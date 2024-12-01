@@ -27,7 +27,7 @@ from math import isqrt
 
 # TERMINOLOGY:
 #    A Sudoku is a 'SIZE' x 'SIZE' 'grid' of 'cells' into which
-#    'symbols' are placed according to the 'One Rule'.
+#    'elements' are placed according to the 'One Rule'.
 #
 #    The grid has SIZE 'rows', and SIZE 'columns', numbered top-to-bottom
 #    and left-to-right starting with zero (e.g., "row zero" is the top row).
@@ -65,7 +65,7 @@ from math import isqrt
 #    Collectively, rows, columns and regions are called "groups", leading
 #    to this expression for the One Rule that defines Sudoku puzzles:
 #
-#           The One Rule:  Each symbol appears exactly once in each group.
+#        The One Rule:  Each element appears exactly once in each group.
 #
 #    A solved Sudoko is a completely-filled grid obeying the One Rule.
 #
@@ -95,20 +95,23 @@ class Cell:
         self.col = col
         self.elems = set(elems)
 
-    # If a Cell becomes 'known' that means there is only one element
-    # in the elems list, and this method will return that if so (else
-    # it returns None meaning the Cell is not yet fully-determined).
-    @property
-    def known(self):
-        """Return a single element, if determined; else None."""
-        if len(self.elems) == 1:
-            return list(self.elems)[0]
-        else:
-            return None
-
+    # A Cell is said to be 'resolved' if it has been determined
+    # to be one specific element. That element will also be its 'value'
     @property
     def resolved(self):
-        return self.known is not None
+        return self.value is not None
+
+    # A Cell only has a 'value' if it is resolved, i.e., there
+    # is only one possible element that it can be.
+    #
+    # Unresolved Cells return None for their 'value'
+    @property
+    def value(self):
+        """A Cell's single element, if resolved; else None."""
+        if len(self.elems) == 1:
+            return list(self.elems)[0]     # the set() cannot be indexed
+        else:
+            return None
 
     def remove_element(self, elem):
         """Take an element out of the choices for this cell.
@@ -166,9 +169,9 @@ class Sudoku:
             for c, elem in enumerate(row):
                 if elem in self.elements:
                     self.move(CellMove(r, c, elem))
-        self.valid = True
+        self._valid = True
 
-    def group_coords(self, gtype, nth, /):
+    def _groupcoords(self, gtype, nth, /):
         """Return list of coordinates for the nth gtype."""
         if gtype == GroupType.ROW:
             return [(nth, c) for c in range(self.size)]
@@ -178,17 +181,18 @@ class Sudoku:
             return self.regioninfo[nth]
 
     def threegroups_coords(self, row, col, /):
-        """Return coords for (row group, col group, region group)."""
+        """Return coord lists: [row group, col group, region group]."""
 
-        # parameters for each of the three ways to obtain group coords
+        # Each of the three ways to obtain group coords
         params = ((GroupType.ROW, row),
                   (GroupType.COL, col),
                   (GroupType.REGION, self.rc2region(row, col)))
 
-        return [self.group_coords(*a) for a in params]
+        return [self._groupcoords(*a) for a in params]
 
     def allgroups_coords(self):
-        return [self.group_coords(gtype, nth)
+        """Return a list of EVERY group coordinates (each as its own list)."""
+        return [self._groupcoords(gtype, nth)
                 for gtype, nth in itertools.product(
                         GroupType, range(self.size))]
 
@@ -197,7 +201,7 @@ class Sudoku:
 
         # this is a dumb, but easy, way to do this
         for nth in range(self.size):
-            if (row, col) in self.group_coords(GroupType.REGION, nth):
+            if (row, col) in self._groupcoords(GroupType.REGION, nth):
                 return nth
         raise ValueError(f"Could not determine region # for {row},{col}")
 
@@ -212,17 +216,13 @@ class Sudoku:
             self._valid = self._validate()
         return self._valid
 
-    @valid.setter
-    def valid(self, val):
-        self._valid = val
-
     def _validate(self):
         # Look for One Rule violations in all groups
         for gcoords in self.allgroups_coords():
             knowns = list(
                 itertools.filterfalse(
                     lambda k: k is None,
-                    (self.grid[rc].known for rc in gcoords)))
+                    (self.grid[rc].value for rc in gcoords)))
 
             # if the length of a set (which eliminates dups) is not
             # the same as the length of the knowns, there were dups
@@ -262,7 +262,7 @@ class Sudoku:
     def copy_and_move(self, m):
         s2 = self.__class__()
         for cell in self.resolved_cells():
-            s2.move(CellMove(cell.row, cell.col, cell.known))
+            s2.move(CellMove(cell.row, cell.col, cell.value))
         s2.move(m)
         return s2
 
@@ -292,10 +292,10 @@ class Sudoku:
 
         # redundant moves happen when prior moves rendered this move
         # a no-up via kills and inferences. Allow for that.
-        if cell.known == m.elem:
+        if cell.value == m.elem:
             return
 
-        self.valid = None              # force revalidation next time
+        self._valid = None             # force revalidation next time
         cell.elems = {m.elem}          # this is THE element here now
 
         # Remove this element from other cells in immediate groups
@@ -340,7 +340,7 @@ class Sudoku:
             else:
                 # if this is now resolved, recursively kill based on *this*
                 if cell.resolved:
-                    self._kill(cell.row, cell.col, cell.known)
+                    self._kill(cell.row, cell.col, cell.value)
 
     # curiously enough the human __str__ representation makes
     # a completely reasonable canonicalstate for the solver search
@@ -363,7 +363,7 @@ class Sudoku:
         for cell in self.grid.values():
             if cell.row != prevrow and prevrow is not None:
                 s += '\n'
-            s += efmt.format(cell.known if cell.resolved else self.STRDOT)
+            s += efmt.format(cell.value if cell.resolved else self.STRDOT)
             prevrow = cell.row
         return s + '\n'
 
