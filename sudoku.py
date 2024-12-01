@@ -21,6 +21,7 @@
 # SOFTWARE.
 
 import itertools
+import functools
 from collections import namedtuple
 from enum import Enum
 from math import isqrt
@@ -171,6 +172,15 @@ class Sudoku:
         # Region "shapes" (automatic for square regions)
         self.regioninfo = regioninfo or self.makeregions()
 
+        # this violence gains 20% search performance improvement by making
+        # it possible to cache/reuse the group coordinate lists calculations
+        # for normal (square) puzzles with normal (square) regions.
+        rgnsiz = isqrt(self.size)
+        if regioninfo is None and rgnsiz * rgnsiz == self.size:
+            self.__cachedagc = self._static_allgroups_coords(self.size)
+        else:
+            self.__cachedagc = None
+
         # Process any initial given cells
         for r, row in enumerate(givens):
             for c, elem in enumerate(row):
@@ -197,11 +207,40 @@ class Sudoku:
 
         return [self._groupcoords(*a) for a in params]
 
+    # slightly-tortured implementation of this vs the more-obvious way
+    # of building it from the other tools. It is written this way so
+    # as to be easily cacheable while allowing that different Sudoku
+    # objects might have different sizes and regioninfo descriptions.
+    #
+    # This little bit of code ugliness gained ~~20% on search performance.
+    #
+    # NOTE WELL that this is ONLY called in cases where the simplified
+    #           logic of this (vs the fully-general logic of the instance
+    #           method implementation) works.
+
+    @staticmethod
+    @functools.cache
+    def _static_allgroups_coords(size):
+        """Return a list of EVERY group coordinates (each as its own list)."""
+        rowXX = [[(nth, c) for c in range(size)] for nth in range(size)]
+        colXX = [[(r, nth) for r in range(size)] for nth in range(size)]
+        rgnXX = []
+        rgnsiz = isqrt(size)
+        for nth in range(size):
+            rx = (nth // rgnsiz) * rgnsiz
+            cx = (nth % rgnsiz) * rgnsiz
+            rgnXX.append(
+                [(i, j)
+                 for i in range(rx, rx + rgnsiz)
+                 for j in range(cx, cx + rgnsiz)])
+        return rowXX + colXX + rgnXX
+
     def allgroups_coords(self):
         """Return a list of EVERY group coordinates (each as its own list)."""
-        return [self._groupcoords(gtype, nth)
-                for gtype, nth in itertools.product(
-                        GroupType, range(self.size))]
+        return self.__cachedagc or [
+            self._groupcoords(gtype, nth)
+            for gtype, nth in itertools.product(
+                    GroupType, range(self.size))]
 
     def rc2region(self, row, col):
         """Return the region # of the given row/col coordinates."""
