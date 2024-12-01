@@ -156,6 +156,7 @@ class Sudoku:
 
         self.elements = elements
         self.size = size
+        self.__cached = None    # see legalmoves() and copy_and_move()
 
         # The grid is a dict of Cell objects, indexed by (row, col) tuple.
         # Each Cell starts out with all possible elements as a potential
@@ -254,23 +255,54 @@ class Sudoku:
         # the 'kills' and deducing singletons dramatically limit that.
         # In practice a "bad" move is discovered very quickly and a "good"
         # move will resolve the puzzle in only a few recursions.
+        #
+        # See heuristic_order() for a discussion of how the ordering
+        # of cell/element choices affects performance.
 
-        for cell in self.unresolved_cells():
-            for elem in cell.elems:
-                move = CellMove(cell.row, cell.col, elem)
-                try:
-                    _ = self.copy_and_move(move)
-                except RuleViolation:
-                    pass
-                else:
-                    yield move
+        for cell, elem in self.heuristic_order():
+            move = CellMove(cell.row, cell.col, elem)
+            try:
+                self.__cached = (move, self.copy_and_move(move))
+            except RuleViolation:
+                pass
+            else:
+                yield move
 
     def copy_and_move(self, m):
+
+        # About caching: (__cached) ... When the puzzlesolver is driving
+        # legalmoves/copy_and_move, what happens is legalmoves has to
+        # dry-run copy_and_move() to make sure it is not yielding an
+        # illegal move (which fouls the search algorithm). The solver
+        # immediately sends that same move right back to copy_and_move,
+        # so this simple cache strategy is nearly a 2x speed optimization.
+        # Note that move() also invalidates this cache to preserve semantics.
+
+        try:
+            cached_m, cached_obj = self.__cached
+        except TypeError:             # __cached was None
+            cached_m = None
+
+        self.__cached = None
+        if cached_m == m:
+            return cached_obj
+
+        # otherwise, really have to do it...
         s2 = self.__class__()
         for cell in self.resolved_cells():
             s2.move(CellMove(cell.row, cell.col, cell.value))
         s2.move(m)
         return s2
+
+    # The heuristic_order is used in legalmoves and determines the order
+    # in which cells and elements will be fed to the search framework.
+    # This can be overridden in subclasses to experiment; this default
+    # version simply examines all cells in grid order and within each cell
+    # examines elements cell.elems order (which may be somewhat randomized)
+    def heuristic_order(self):
+        for cell in self.unresolved_cells():
+            for elem in cell.elems:
+                yield cell, elem
 
     # search to see if there is any group where 'elem' appears
     # in only one unresolved cell of that group; if so it is called
@@ -298,10 +330,11 @@ class Sudoku:
 
         # redundant moves happen when prior moves rendered this move
         # a no-up via kills and inferences. Allow for that.
-        if cell.value == m.elem:
+        if cell.resolved and cell.value == m.elem:
             return
 
         self._valid = None             # force revalidation next time
+        self.__cached = None           # see legalmoves/copy_and_move
         cell.resolve(m.elem)           # this is THE element here now
 
         # Remove this element from other cells in immediate groups
@@ -323,7 +356,7 @@ class Sudoku:
         if not self.valid:    # this validate should NEVER fail
             raise AlgorithmFailure("CODING ERROR")
 
-    # KILLing simply means if, for example, a '5' was placed a (0, 0)
+    # KILLing simply means if, for example, a '5' was placed at (0, 0)
     # then a '5' cannot be anywhere else in row 0, column 0, or region 0.
     # During a kill, if removing the element from a cell resolves *that*
     # cell (i.e., it had two possibilities but now has only 1) then the
@@ -332,8 +365,8 @@ class Sudoku:
     def _kill(self, row, col, elem):
 
         # the cells of every group this (row, col) is in:
-        killcells = (self.grid[(r, c)]
-                     for r, c in itertools.chain.from_iterable(
+        killcells = (self.grid[rc]
+                     for rc in itertools.chain.from_iterable(
                              self.threegroups_coords(row, col)))
 
         for cell in killcells:
@@ -344,8 +377,8 @@ class Sudoku:
             if cell.resolved:
                 self._kill(cell.row, cell.col, cell.value)
 
-    # curiously enough the human __str__ representation makes
-    # a completely reasonable canonicalstate for the solver search
+    # The human __str__ representation works just fine, and experimentation
+    # shows that performance (and size) here don't seem to matter.
     def canonicalstate(self):
         return str(self)
 
@@ -474,3 +507,27 @@ pzjefftest = [
     "....1.2..",
     ".8.....3.",
 ]
+
+pzx = [
+    "..9...2..",
+    ".8.5...1.",
+    "7.......6",
+    "..6.9....",
+    ".5.8..3..",
+    "4....7...",
+    ".....4..9",
+    ".3..1..8.",
+    "...2..5.."
+]
+
+pzxA = [
+    "319468275",
+    "682573914",
+    "745921836",
+    "876392451",
+    "251846397",
+    "493157628",
+    "528734169",
+    "934615782",
+    "167289543"
+    ]
