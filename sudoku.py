@@ -124,6 +124,12 @@ class Cell:
                 raise RuleViolation(f"row={self.row}, col={self.col}")
             self.elems.remove(elem)
 
+    def resolve(self, elem):
+        """Make the cell be specifically the given elem."""
+        if elem not in self.elems:
+            raise RuleViolation(f"Can't set {elem} @ ({self.row}, {self.col})")
+        self.elems = {elem}
+
 
 class Sudoku:
 
@@ -296,7 +302,7 @@ class Sudoku:
             return
 
         self._valid = None             # force revalidation next time
-        cell.elems = {m.elem}          # this is THE element here now
+        cell.resolve(m.elem)           # this is THE element here now
 
         # Remove this element from other cells in immediate groups
         self._kill(m.row, m.col, m.elem)
@@ -333,14 +339,10 @@ class Sudoku:
         for cell in killcells:
             if cell.resolved:      # don't take out the last element!
                 continue
-            try:
-                cell.elems.remove(elem)
-            except KeyError:       # this elem was already killed in cell
-                pass
-            else:
-                # if this is now resolved, recursively kill based on *this*
-                if cell.resolved:
-                    self._kill(cell.row, cell.col, cell.value)
+            cell.remove_element(elem)
+            # if this is now resolved, recursively kill based on *this*
+            if cell.resolved:
+                self._kill(cell.row, cell.col, cell.value)
 
     # curiously enough the human __str__ representation makes
     # a completely reasonable canonicalstate for the solver search
