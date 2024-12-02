@@ -23,7 +23,7 @@
 import itertools
 from collections import namedtuple
 
-from groupcoords import GroupType, GroupCoords
+from groupcoords import GroupCoords
 
 
 # TERMINOLOGY:

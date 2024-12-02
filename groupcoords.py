@@ -41,13 +41,6 @@ from math import isqrt
 GroupType = Enum('GroupType', ['ROW', 'COL', 'REGION'])
 
 
-#
-# Each of these cached functions depends ONLY on its parameters
-# and not on the specific GroupCoords (or Sudoku) instance. This
-# is how it needs to be, and why these are outside of the GroupCoords
-# class (though it turns out they can be @classmethods and that would
-# also work)
-
 class GroupCoords:
     def __init__(self, size, regioninfo, /):
         self.size = size
