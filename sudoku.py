@@ -95,16 +95,9 @@ class Cell:
         self.row = row
         self.col = col
         self.elems = frozenset(elems)
-        xxx = """
-        if isinstance(elems, frozenset):
-            self.elems = elems
-        else:
-            self.elems = frozenset(elems)
-        """
 
     def __deepcopy__(self, memo):
-        s2 = copy.copy(self)         # because frozenset; optimization
-        return s2
+        return copy.copy(self)       # because frozenset; optimization
 
     # A Cell is said to be 'resolved' if it has been determined
     # to be one specific element. That element will also be its 'value'
@@ -187,6 +180,7 @@ class Sudoku:
         self._valid = True
 
     def __deepcopy__(self, memo):
+        # performance optimizations; NOTE: deepcopy semantics preserved
         s2 = copy.copy(self)
         s2.grid = {rc: Cell(*rc, c.elems) for rc, c in self.grid.items()}
         return s2
@@ -232,11 +226,8 @@ class Sudoku:
         # Brute force: Try each candidate in each cell, in order.
         # The combinatoric explosion here would be enormous; however,
         # the 'kills' and deducing singletons dramatically limit that.
-        # In practice a "bad" move is discovered very quickly and a "good"
-        # move will resolve the puzzle in only a few recursions.
-        #
-        # See heuristic_order() for a discussion of how the ordering
-        # of cell/element choices affects performance.
+        # In practice a "bad" move is discovered quickly enough that
+        # even the hardest puzzles can be solved in ~~10000 evaluations.
 
         for cell, elem in self.heuristic_order():
             move = CellMove(cell.row, cell.col, elem)
@@ -274,11 +265,20 @@ class Sudoku:
     # The heuristic_order is used in legalmoves and determines the order
     # in which cells and elements will be fed to the search framework.
     # This can be overridden in subclasses to experiment; this default
-    # version simply examines all cells in grid order and within each cell
-    # examines elements cell.elems order (which may be somewhat randomized)
+    # version simply examines all cells/elements in order.
+    #
+    # Two things to note:
+    #   1) cell.elems is a frozenset and the ordering will vary.
+    #      The call to sorted() has no measurable effect on performance
+    #      but brings the advantage of predictable/unvarying results.
+    #      If it is taken out everything still works; however, runs in
+    #      two different python interpreter instances will explore the
+    #      search space in different orders.
+    #   2) As of this writing, no heuristic tried has performed
+    #      better than "just do them in order".
     def heuristic_order(self):
         for cell in self.unresolved_cells():
-            for elem in cell.elems:
+            for elem in sorted(cell.elems):
                 yield cell, elem
 
     # search to see if there is any group where 'elem' appears
