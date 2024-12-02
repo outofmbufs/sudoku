@@ -21,10 +21,10 @@
 # SOFTWARE.
 
 import itertools
-import functools
 from collections import namedtuple
-from enum import Enum
-from math import isqrt
+
+from groupcoords import GroupType, GroupCoords
+
 
 # TERMINOLOGY:
 #    A Sudoku is a 'SIZE' x 'SIZE' 'grid' of 'cells' into which
@@ -81,8 +81,6 @@ class RuleViolation(Exception):
 class AlgorithmFailure(Exception):
     pass
 
-
-GroupType = Enum('GroupType', ['ROW', 'COL', 'REGION'])
 
 CellMove = namedtuple('CellMove', ['row', 'col', 'elem'])
 
@@ -169,17 +167,8 @@ class Sudoku:
             for r, c in itertools.product(range(self.size), range(self.size))
         }
 
-        # Region "shapes" (automatic for square regions)
-        self.regioninfo = regioninfo or self.makeregions()
-
-        # this violence gains 20% search performance improvement by making
-        # it possible to cache/reuse the group coordinate lists calculations
-        # for normal (square) puzzles with normal (square) regions.
-        rgnsiz = isqrt(self.size)
-        if regioninfo is None and rgnsiz * rgnsiz == self.size:
-            self.__cachedagc = self._static_allgroups_coords(self.size)
-        else:
-            self.__cachedagc = None
+        # group coordinate lists
+        self.grco = GroupCoords(size, regioninfo)
 
         # Process any initial given cells
         for r, row in enumerate(givens):
@@ -187,69 +176,6 @@ class Sudoku:
                 if elem in self.elements:
                     self.move(CellMove(r, c, elem))
         self._valid = True
-
-    def _groupcoords(self, gtype, nth, /):
-        """Return list of coordinates for the nth gtype."""
-        if gtype == GroupType.ROW:
-            return [(nth, c) for c in range(self.size)]
-        elif gtype == GroupType.COL:
-            return [(r, nth) for r in range(self.size)]
-        elif gtype == GroupType.REGION:
-            return self.regioninfo[nth]
-
-    def threegroups_coords(self, row, col, /):
-        """Return coord lists: [row group, col group, region group]."""
-
-        # Each of the three ways to obtain group coords
-        params = ((GroupType.ROW, row),
-                  (GroupType.COL, col),
-                  (GroupType.REGION, self.rc2region(row, col)))
-
-        return [self._groupcoords(*a) for a in params]
-
-    # slightly-tortured implementation of this vs the more-obvious way
-    # of building it from the other tools. It is written this way so
-    # as to be easily cacheable while allowing that different Sudoku
-    # objects might have different sizes and regioninfo descriptions.
-    #
-    # This little bit of code ugliness gained ~~20% on search performance.
-    #
-    # NOTE WELL that this is ONLY called in cases where the simplified
-    #           logic of this (vs the fully-general logic of the instance
-    #           method implementation) works.
-
-    @staticmethod
-    @functools.cache
-    def _static_allgroups_coords(size):
-        """Return a list of EVERY group coordinates (each as its own list)."""
-        rowXX = [[(nth, c) for c in range(size)] for nth in range(size)]
-        colXX = [[(r, nth) for r in range(size)] for nth in range(size)]
-        rgnXX = []
-        rgnsiz = isqrt(size)
-        for nth in range(size):
-            rx = (nth // rgnsiz) * rgnsiz
-            cx = (nth % rgnsiz) * rgnsiz
-            rgnXX.append(
-                [(i, j)
-                 for i in range(rx, rx + rgnsiz)
-                 for j in range(cx, cx + rgnsiz)])
-        return rowXX + colXX + rgnXX
-
-    def allgroups_coords(self):
-        """Return a list of EVERY group coordinates (each as its own list)."""
-        return self.__cachedagc or [
-            self._groupcoords(gtype, nth)
-            for gtype, nth in itertools.product(
-                    GroupType, range(self.size))]
-
-    def rc2region(self, row, col):
-        """Return the region # of the given row/col coordinates."""
-
-        # this is a dumb, but easy, way to do this
-        for nth in range(self.size):
-            if (row, col) in self._groupcoords(GroupType.REGION, nth):
-                return nth
-        raise ValueError(f"Could not determine region # for {row},{col}")
 
     # Attribute (property) .valid is True if the puzzle conforms to
     # the One Rule; False if it does not, and None if not currently
@@ -264,7 +190,7 @@ class Sudoku:
 
     def _validate(self):
         # Look for One Rule violations in all groups
-        for gcoords in self.allgroups_coords():
+        for gcoords in self.grco.allgroups():
             knowns = list(
                 itertools.filterfalse(
                     lambda k: k is None,
@@ -354,7 +280,7 @@ class Sudoku:
 
     def deduce_a_singleton(self, elem):
 
-        for gcoords in self.allgroups_coords():
+        for gcoords in self.grco.allgroups():
             cells_with_elem = [c for c in (self.grid[rc] for rc in gcoords)
                                if elem in c.elems and not c.resolved]
             if len(cells_with_elem) == 1:
@@ -406,7 +332,7 @@ class Sudoku:
         # the cells of every group this (row, col) is in:
         killcells = (self.grid[rc]
                      for rc in itertools.chain.from_iterable(
-                             self.threegroups_coords(row, col)))
+                             self.grco.threegroups(row, col)))
 
         for cell in killcells:
             if cell.resolved:      # don't take out the last element!
@@ -440,133 +366,3 @@ class Sudoku:
             s += efmt.format(cell.value if cell.resolved else self.STRDOT)
             prevrow = cell.row
         return s + '\n'
-
-    def makeregions(self):
-        """Make the regioninfo for default square regions."""
-
-        regionsize = isqrt(self.size)
-        if regionsize * regionsize != self.size:
-            raise ValueError(f"can't make square regions (size={self.size})")
-
-        regioninfo = []
-        for nth in range(self.size):
-            rx = (nth // regionsize) * regionsize
-            cx = (nth % regionsize) * regionsize
-            regioninfo.append(
-                [(i, j)
-                 for i in range(rx, rx + regionsize)
-                 for j in range(cx, cx + regionsize)])
-
-        return regioninfo
-
-
-pzs = [
-    "926.15...",
-    "1.87639..",
-    "3.79..165",
-    "..9....38",
-    "7.....6..",
-    "...396...",
-    ".7.....16",
-    "694...7.2",
-    "5.36..4.9"
-]
-
-
-pz37 = [
-    "...4....3",
-    "2..5976..",
-    "8.4.1.5..",
-    ".7.2.134.",
-    "3.5...1.8",
-    ".487.5.9.",
-    "..2.6.7.1",
-    "..3859..2",
-    "4....2..."
-]
-
-pz307 = [
-    "5.1.7...6",
-    "6.....14.",
-    ".....4.2.",
-    ".5...92.8",
-    "....8....",
-    "2.85...7.",
-    ".3.1.....",
-    ".65.....2",
-    "9...6.3.7",
-]
-
-
-pz307b = [
-    "541372896",
-    "6.....14.",
-    ".....4.2.",
-    ".5...92.8",
-    "....8....",
-    "2.85...7.",
-    ".3.1.....",
-    ".65.....2",
-    "9...6.3.7",
-]
-
-
-pz17s = [
-    "1....3.6.",
-    ".7....8..",
-    ".........",
-    "3.6......",
-    "...1..4..",
-    "2........",
-    ".4.87....",
-    "....4...3",
-    ".5.....2."
-]
-
-pz17s_2 = [
-    ".9.3..7..",
-    "......5..",
-    ".......6.",
-    "35....8..",
-    "....26...",
-    ".1..4....",
-    "7.6....4.",
-    "...1.....",
-    "2........"
-]
-
-pzjefftest = [
-    "...4....1",
-    "...9.28..",
-    "3......57",
-    ".7.3.....",
-    "..2.4.1..",
-    "..8.2..65",
-    ".....9..8",
-    "....1.2..",
-    ".8.....3.",
-]
-
-pzx = [
-    "..9...2..",
-    ".8.5...1.",
-    "7.......6",
-    "..6.9....",
-    ".5.8..3..",
-    "4....7...",
-    ".....4..9",
-    ".3..1..8.",
-    "...2..5.."
-]
-
-pzxA = [
-    "319468275",
-    "682573914",
-    "745921836",
-    "876392451",
-    "251846397",
-    "493157628",
-    "528734169",
-    "934615782",
-    "167289543"
-    ]
