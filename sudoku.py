@@ -23,7 +23,7 @@
 import itertools
 from collections import namedtuple
 
-from groupcoords import GroupCoords
+from sudokugeo import SudokuGeo
 
 
 # TERMINOLOGY:
@@ -154,8 +154,11 @@ class Sudoku:
                  ):
 
         self.elements = elements
-        self.size = size
         self.__cached = None    # see legalmoves() and copy_and_move()
+
+        # geometry functions separated out so that separate sudoku objects
+        # that share a common geometry will benefit from caching
+        self.geo = SudokuGeo(size, regioninfo)
 
         # The grid is a dict of Cell objects, indexed by (row, col) tuple.
         # Each Cell starts out with all possible elements as a potential
@@ -163,12 +166,8 @@ class Sudoku:
         # until eventually (if the puzzle gets solved) there is only one
         # choice in each individual Cell.
         self.grid = {
-            (r, c): Cell(r, c, self.elements)
-            for r, c in itertools.product(range(self.size), range(self.size))
+            rc: Cell(*rc, self.elements) for rc in self.geo.allgrid()
         }
-
-        # group coordinate lists
-        self.grco = GroupCoords(size, regioninfo)
 
         # Process any initial given cells
         for r, row in enumerate(givens):
@@ -190,7 +189,7 @@ class Sudoku:
 
     def _validate(self):
         # Look for One Rule violations in all groups
-        for gcoords in self.grco.allgroups():
+        for gcoords in self.geo.allgroups():
             knowns = list(
                 itertools.filterfalse(
                     lambda k: k is None,
@@ -280,7 +279,7 @@ class Sudoku:
 
     def deduce_a_singleton(self, elem):
 
-        for gcoords in self.grco.allgroups():
+        for gcoords in self.geo.allgroups():
             cells_with_elem = [c for c in (self.grid[rc] for rc in gcoords)
                                if elem in c.elems and not c.resolved]
             if len(cells_with_elem) == 1:
@@ -332,7 +331,7 @@ class Sudoku:
         # the cells of every group this (row, col) is in:
         killcells = (self.grid[rc]
                      for rc in itertools.chain.from_iterable(
-                             self.grco.threegroups(row, col)))
+                             self.geo.threegroups(row, col)))
 
         for cell in killcells:
             if cell.resolved:      # don't take out the last element!

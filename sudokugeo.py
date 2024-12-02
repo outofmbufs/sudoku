@@ -22,13 +22,15 @@
 
 
 #
-# This is a helper class for Sudoku puzzles.
+# This is a helper class for Sudoku puzzles, essentially defined the
+# geometry of the puzzle.
 #
-# These are the various ways to calculate lists of coordinates.
-# They turn out to be performance sensitive; being able to cache
-# the output of these functions saved 20% on difficult-puzzle search time.
-# There's some clutter and rigamarole needed to get the right kind
-# of caching behavior, so this keeps all that violence isolated from Sudoku().
+# Abstracting this out into a separate class made it possible to
+# (somewhat) cleanly enable caching on the coordinate-computations such
+# as: "return the list of coordinates for the region this (r, c) is in"
+# and the like, which turns out to be a significant (20%) performance
+# gain in deep/difficult puzzle solves. So, it's messy but the mess is
+# localized in this module.
 #
 
 
@@ -41,16 +43,23 @@ from math import isqrt
 GroupType = Enum('GroupType', ['ROW', 'COL', 'REGION'])
 
 
-class GroupCoords:
-    def __init__(self, size, regioninfo, /):
+class SudokuGeo:
+    def __init__(self, size, regioninfo=None, /):
         self.size = size
         self.regioninfo = regioninfo or self.__makeregioninfo(size)
 
+    # This returns a very long list of lists, the inner lists being
+    # the (r, c) tuples of every row, every column, and every region.
     def allgroups(self):
+        """Return a list of EVERY group coordinates, each as its own list."""
         return self.__agc(self.size, self.regioninfo)
 
     def threegroups(self, row, col):
+        """Return coord lists: [row group, col group, region group]."""
         return self.__threegc(row, col, self.size, self.regioninfo)
+
+    def allgrid(self):
+        return itertools.product(range(self.size), range(self.size))
 
     # These are the (cacheable!) class methods that generate the
     # coordinate lists from the given parameters. Some of this may
