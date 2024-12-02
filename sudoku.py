@@ -21,6 +21,7 @@
 # SOFTWARE.
 
 import itertools
+import copy
 from collections import namedtuple
 
 from sudokugeo import SudokuGeo
@@ -86,13 +87,24 @@ CellMove = namedtuple('CellMove', ['row', 'col', 'elem'])
 
 
 class Cell:
+
     # Each cell contains its row and col coordinates and a set 'elems'
     # representing element values that are not yet precluded from this
     # cell by the One Rule.
     def __init__(self, row, col, elems):
         self.row = row
         self.col = col
-        self.elems = set(elems)
+        self.elems = frozenset(elems)
+        xxx = """
+        if isinstance(elems, frozenset):
+            self.elems = elems
+        else:
+            self.elems = frozenset(elems)
+        """
+
+    def __deepcopy__(self, memo):
+        s2 = copy.copy(self)         # because frozenset; optimization
+        return s2
 
     # A Cell is said to be 'resolved' if it has been determined
     # to be one specific element. That element will also be its 'value'
@@ -108,7 +120,7 @@ class Cell:
     def value(self):
         """A Cell's single element, if resolved; else None."""
         if len(self.elems) == 1:
-            return list(self.elems)[0]     # the set() cannot be indexed
+            return list(self.elems)[0]     # e.g., unpack the only element
         else:
             return None
 
@@ -121,13 +133,13 @@ class Cell:
         if elem in self.elems:
             if len(self.elems) == 1:
                 raise RuleViolation(f"row={self.row}, col={self.col}")
-            self.elems.remove(elem)
+            self.elems -= {elem}    # NOTE: this makes a *new* frozenset
 
     def resolve(self, elem):
         """Make the cell be specifically the given elem."""
         if elem not in self.elems:
             raise RuleViolation(f"Can't set {elem} @ ({self.row}, {self.col})")
-        self.elems = {elem}
+        self.elems = frozenset({elem})
 
 
 class Sudoku:
@@ -154,27 +166,30 @@ class Sudoku:
                  ):
 
         self.elements = elements
-        self.__cached = None    # see legalmoves() and copy_and_move()
-
-        # geometry functions separated out so that separate sudoku objects
-        # that share a common geometry will benefit from caching
         self.geo = SudokuGeo(size, regioninfo)
 
         # The grid is a dict of Cell objects, indexed by (row, col) tuple.
         # Each Cell starts out with all possible elements as a potential
-        # choice; as the solver progresses each Cell's choices are narrowed
-        # until eventually (if the puzzle gets solved) there is only one
-        # choice in each individual Cell.
-        self.grid = {
-            rc: Cell(*rc, self.elements) for rc in self.geo.allgrid()
-        }
+        # choice; as the solver progresses each Cell's choices are
+        # narrowed until eventually (if the puzzle gets solved) there is
+        # only one choice in each individual Cell.
+        self.grid = {rc: Cell(*rc, elements) for rc in self.geo.allgrid()}
+
+        self.__cached = None    # see legalmoves() and copy_and_move()
 
         # Process any initial given cells
         for r, row in enumerate(givens):
             for c, elem in enumerate(row):
                 if elem in self.elements:
                     self.move(CellMove(r, c, elem))
+
+        # move() ensured givens (if any) were valid, so start out valid
         self._valid = True
+
+    def __deepcopy__(self, memo):
+        s2 = copy.copy(self)
+        s2.grid = {rc: Cell(*rc, c.elems) for rc, c in self.grid.items()}
+        return s2
 
     # Attribute (property) .valid is True if the puzzle conforms to
     # the One Rule; False if it does not, and None if not currently
@@ -251,10 +266,8 @@ class Sudoku:
         if cached_m == m:
             return cached_obj
 
-        # otherwise, really have to do it...
-        s2 = self.__class__()
-        for cell in self.resolved_cells():
-            s2.move(CellMove(cell.row, cell.col, cell.value))
+        # otherwise, really have to do the copy
+        s2 = copy.deepcopy(self)
         s2.move(m)
         return s2
 
@@ -330,8 +343,7 @@ class Sudoku:
 
         # the cells of every group this (row, col) is in:
         killcells = (self.grid[rc]
-                     for rc in itertools.chain.from_iterable(
-                             self.geo.threegroups(row, col)))
+                     for rc in self.geo.threegroups(row, col, chain=True))
 
         for cell in killcells:
             if cell.resolved:      # don't take out the last element!
