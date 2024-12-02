@@ -54,9 +54,12 @@ class SudokuGeo:
         """Return a list of EVERY group coordinates, each as its own list."""
         return self.__agc(self.size, self.regioninfo)
 
-    def threegroups(self, row, col):
+    def threegroups(self, row, col, /, *, chain=False):
         """Return coord lists: [row group, col group, region group]."""
-        return self.__threegc(row, col, self.size, self.regioninfo)
+        if chain:
+            return self.__chainedthreegc(row, col, self.size, self.regioninfo)
+        else:
+            return self.__threegc(row, col, self.size, self.regioninfo)
 
     def allgrid(self):
         return itertools.product(range(self.size), range(self.size))
@@ -114,7 +117,14 @@ class SudokuGeo:
                   (GroupType.COL, col),
                   (GroupType.REGION, cls.__rc2rgn(row, col, size, regioninfo)))
 
-        return [cls.__group(*a, size, regioninfo) for a in params]
+        return tuple(cls.__group(*a, size, regioninfo) for a in params)
+
+    @classmethod
+    @functools.cache
+    def __chainedthreegc(cls, row, col, size, regioninfo, /):
+        return tuple(rc for rc in (
+            itertools.chain.from_iterable(
+                cls.__threegc(row, col, size, regioninfo))))
 
     @classmethod
     @functools.cache
