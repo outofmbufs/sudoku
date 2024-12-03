@@ -20,8 +20,8 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-import itertools
 import copy
+import itertools
 from collections import namedtuple
 
 from sudokugeo import SudokuGeo
@@ -135,7 +135,7 @@ class Cell:
         self.elems = frozenset({elem})
 
 
-class Sudoku:
+class _Sudoku:
 
     # Create a Sudoku puzzle. The 'givens' are a list of strings such as:
     #       givens = [
@@ -153,20 +153,20 @@ class Sudoku:
     # for initializing the given/known squares
     #
     def __init__(self, givens=[], /, *,
-                 size=9,
-                 elements=['1', '2', '3', '4', '5', '6', '7', '8', '9'],
-                 regioninfo=None,
+                 geo,
+                 elements=None,
+                 autosolve=True
                  ):
 
-        self.elements = elements
-        self.geo = SudokuGeo(size, regioninfo)
+        self.geo = geo
+        self.elements = elements or [str(i+1) for i in range(geo.size)]
 
         # The grid is a dict of Cell objects, indexed by (row, col) tuple.
         # Each Cell starts out with all possible elements as a potential
         # choice; as the solver progresses each Cell's choices are
         # narrowed until eventually (if the puzzle gets solved) there is
         # only one choice in each individual Cell.
-        self.grid = {rc: Cell(*rc, elements) for rc in self.geo.allgrid()}
+        self.grid = {rc: Cell(*rc, self.elements) for rc in self.geo.allgrid()}
 
         self.__cached = None    # see legalmoves() and copy_and_move()
 
@@ -174,7 +174,7 @@ class Sudoku:
         for r, row in enumerate(givens):
             for c, elem in enumerate(row):
                 if elem in self.elements:
-                    self.move(CellMove(r, c, elem))
+                    self.move(CellMove(r, c, elem), autosolve=autosolve)
 
         # move() ensured givens (if any) were valid, so start out valid
         self._valid = True
@@ -259,7 +259,7 @@ class Sudoku:
 
         # otherwise, really have to do the copy
         s2 = copy.deepcopy(self)
-        s2.move(m)
+        s2.move(m, autosolve=True)
         return s2
 
     # The heuristic_order is used in legalmoves and determines the order
@@ -300,7 +300,16 @@ class Sudoku:
                 return CellMove(cell.row, cell.col, elem)
         return None
 
-    def move(self, m):
+    def move(self, m, /, *, autosolve=False):
+        """Perform a CellMove on the puzzle, in-place.
+
+        If autosolve is True (default is False) then the any moves
+        unambiguously implied by the resulting puzzle state will be
+        automatically made. NOTE: This often solves a LOT of cells.
+
+        Raises RuleViolation if the move is illegal (or if any
+        autosolve moves lead to a contradition)
+        """
         cell = self.grid[(m.row, m.col)]
         if m.elem not in cell.elems:
             raise RuleViolation(f"{m} element is not a candidate")
@@ -314,6 +323,12 @@ class Sudoku:
         self.__cached = None           # see legalmoves/copy_and_move
         cell.resolve(m.elem)           # this is THE element here now
 
+        if autosolve:
+            self._autosolve(m)
+
+    def _autosolve(self, m, /):
+        """Given a just-made move m, resolve everything it implies."""
+
         # Remove this element from other cells in immediate groups
         self._kill(m.row, m.col, m.elem)
 
@@ -325,7 +340,7 @@ class Sudoku:
             for elem in self.elements:
                 singleton_m = self.deduce_a_singleton(elem)
                 if singleton_m is not None:
-                    self.move(singleton_m)
+                    self.move(singleton_m, autosolve=True)
                     break    # this restarts the 'for' bcs of outer while
             else:
                 break        # the 'for' found nothing, so all done
@@ -377,3 +392,8 @@ class Sudoku:
             s += efmt.format(cell.value if cell.resolved else self.STRDOT)
             prevrow = cell.row
         return s + '\n'
+
+
+class Sudoku(_Sudoku):
+    def __init__(self, *args, size=9, regioninfo=None, **kwargs):
+        super().__init__(*args, geo=SudokuGeo(size, regioninfo), **kwargs)
