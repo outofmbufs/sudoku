@@ -24,7 +24,7 @@ import copy
 import itertools
 from collections import namedtuple
 
-from sudokugeo import SudokuGeo
+from sudokugeo import StandardGeo
 
 
 # TERMINOLOGY:
@@ -135,7 +135,7 @@ class Cell:
         self.elems = frozenset({elem})
 
 
-class _Sudoku:
+class Sudoku:
 
     # Create a Sudoku puzzle. The 'givens' are a list of strings such as:
     #       givens = [
@@ -152,28 +152,25 @@ class _Sudoku:
     #
     # for initializing the given/known squares
     #
-    def __init__(self, givens=[], /, *,
-                 geo,
-                 elements=None,
-                 autosolve=True
-                 ):
+    def __init__(self, givens=[], /, *, geo=None, autosolve=True):
 
-        self.geo = geo
-        self.elements = elements or [str(i+1) for i in range(geo.size)]
+        self.geo = geo or StandardGeo(9)
 
         # The grid is a dict of Cell objects, indexed by (row, col) tuple.
         # Each Cell starts out with all possible elements as a potential
         # choice; as the solver progresses each Cell's choices are
         # narrowed until eventually (if the puzzle gets solved) there is
         # only one choice in each individual Cell.
-        self.grid = {rc: Cell(*rc, self.elements) for rc in self.geo.allgrid()}
+        self.grid = {
+            rc: Cell(*rc, self.geo.elements) for rc in self.geo.allgrid()
+        }
 
         self.__cached = None    # see legalmoves() and copy_and_move()
 
         # Process any initial given cells
         for r, row in enumerate(givens):
             for c, elem in enumerate(row):
-                if elem in self.elements:
+                if elem in self.geo.elements:
                     self.move(CellMove(r, c, elem), autosolve=autosolve)
 
         # move() ensured givens (if any) were valid, so start out valid
@@ -337,7 +334,7 @@ class _Sudoku:
 
         # keep looping over singletons until none are found.
         while True:
-            for elem in self.elements:
+            for elem in self.geo.elements:
                 singleton_m = self.deduce_a_singleton(elem)
                 if singleton_m is not None:
                     self.move(singleton_m, autosolve=True)
@@ -357,8 +354,7 @@ class _Sudoku:
     def _kill(self, row, col, elem):
 
         # the cells of every group this (row, col) is in:
-        killcells = (self.grid[rc]
-                     for rc in self.geo.threegroups(row, col, chain=True))
+        killcells = (self.grid[rc] for rc in self.geo.combinedgroups(row, col))
 
         for cell in killcells:
             if cell.resolved:      # don't take out the last element!
@@ -383,7 +379,7 @@ class _Sudoku:
 
         # the goal of this is to make the string field for the elements
         # the same width for all, even if some are longer than others
-        efmt = '{' + f":^{2+max(map(len, map(str, self.elements)))}s" + '}'
+        efmt = '{' + f":^{2+max(map(len, map(str, self.geo.elements)))}s" + '}'
         s = ""
         prevrow = None
         for cell in self.grid.values():
@@ -392,8 +388,3 @@ class _Sudoku:
             s += efmt.format(cell.value if cell.resolved else self.STRDOT)
             prevrow = cell.row
         return s + '\n'
-
-
-class Sudoku(_Sudoku):
-    def __init__(self, *args, size=9, regioninfo=None, **kwargs):
-        super().__init__(*args, geo=SudokuGeo(size, regioninfo), **kwargs)
