@@ -83,10 +83,12 @@ class AlgorithmFailure(Exception):
     pass
 
 
+# A specific 'move' (i.e., filling in a cell with a known element value)
 CellMove = namedtuple('CellMove', ['row', 'col', 'elem'])
 
 
 class Cell:
+    """A Sudoku puzzle is a grid of Cells."""
 
     # Each cell contains its row and col coordinates and a set 'elems'
     # representing element values that are not yet precluded from this
@@ -96,43 +98,37 @@ class Cell:
         self.col = col
         self.elems = frozenset(elems)
 
-    def __deepcopy__(self, memo):
-        return copy.copy(self)       # because frozenset; optimization
+        # A Cell has a non-None 'value' if it has been determined to be one
+        # specific element. If it still could be one of several elements
+        # then its 'value' attribute will be None.
+        #
+        # The original version of this code used @property to compute the
+        # value attribute from self.elems dynamically. That is simple,
+        # pythonic, and always correct; however, it slows down puzzle
+        # searching by more than 20% difference. Thus, 'value' is instead
+        # updated manually any place that self.elems is modified.
 
-    # A Cell is said to be 'resolved' if it has been determined
-    # to be one specific element. That element will also be its 'value'
-    @property
-    def resolved(self):
-        return self.value is not None
-
-    # A Cell only has a 'value' if it is resolved, i.e., there
-    # is only one possible element that it can be.
-    #
-    # Unresolved Cells return None for their 'value'
-    @property
-    def value(self):
-        """A Cell's single element, if resolved; else None."""
-        if len(self.elems) == 1:
-            return list(self.elems)[0]     # e.g., unpack the only element
-        else:
-            return None
+        self.value = list(self.elems)[0] if len(self.elems) == 1 else None
 
     def remove_element(self, elem):
         """Take an element out of the choices for this cell.
-        Is a no-op if the element has already been removed.
 
+        Is a no-op if the element has already been removed.
         Raises RuleViolation if that leaves no choices at all.
         """
         if elem in self.elems:
             if len(self.elems) == 1:
                 raise RuleViolation(f"row={self.row}, col={self.col}")
             self.elems -= {elem}    # NOTE: this makes a *new* frozenset
+            if len(self.elems) == 1:
+                self.value = list(self.elems)[0]
 
     def resolve(self, elem):
         """Make the cell be specifically the given elem."""
         if elem not in self.elems:
             raise RuleViolation(f"Can't set {elem} @ ({self.row}, {self.col})")
         self.elems = frozenset({elem})
+        self.value = elem
 
 
 class Sudoku:
@@ -177,7 +173,39 @@ class Sudoku:
         self._valid = True
 
     def __deepcopy__(self, memo):
-        # performance optimizations; NOTE: deepcopy semantics preserved
+        #
+        # Optimizing __deepcopy__ like this cut more than 50% off the
+        # solving time for large/difficult puzzles.
+        #
+        # Significant deepcopy performance gains came from:
+        #    * shallow-copying geo because it is a large, readonly, object.
+        #    * shallow-copying __cached ... see discussion below.
+        #    * hybrid-copying the grid ... see discussion below.
+        #
+        # Why shallow-copying __cached works and is an improvement:
+        #    The __cached attribute is a tuple:
+        #          (CellMove object, Sudoku object)
+        #    (i.e., "proposed move" and "resulting puzzle") and if it is
+        #    deepcopy'd then every __deepcopy__ call copies TWO Sudoku
+        #    objects - the primary one ('self') and, potentially, the
+        #    "resulting puzzle" in the __cached tuple. However, there
+        #    is no need to deep copy the "resulting puzzle" because it will
+        #    never be mutated until/unless it becomes 'self' here in a
+        #    subsequent copy_and_move().  Thus it need not be copied here.
+        #    This one optimization led to a substantial performance
+        #    improvement for difficult puzzles (involving much copying).
+        #
+        # Why hybrid-copying the grid works and is an improvement:
+        #    Cell objects are definitely mutable and need to be copied,
+        #    but THEIR underlying frozenset objects are not mutable and
+        #    can be shared by the copied Cell objects. It would be nice
+        #    if deepcopy understood this about frozensets but either it does
+        #    not, or, in any case, there is still a significant performance
+        #    gain to be had by optimizing this part of the deepcopy.
+        #
+        #    **COUPLING NOTE**: This means this __deepcopy__ understands
+        #                       more than it "should" about Cells.
+        #
         s2 = copy.copy(self)
         s2.grid = {rc: Cell(*rc, c.elems) for rc, c in self.grid.items()}
         return s2
@@ -209,11 +237,11 @@ class Sudoku:
 
     def unresolved_cells(self):
         return itertools.filterfalse(
-            lambda c: c.resolved, self.grid.values())
+            lambda c: c.value is not None, self.grid.values())
 
     def resolved_cells(self):
         return itertools.filterfalse(
-            lambda c: not c.resolved, self.grid.values())
+            lambda c: c.value is None, self.grid.values())
 
     def legalmoves(self):
         """Generate all potential legal moves."""
@@ -274,9 +302,9 @@ class Sudoku:
     #   2) As of this writing, no heuristic tried has performed
     #      better than "just do them in order".
     def heuristic_order(self):
-        for cell in self.unresolved_cells():
-            for elem in sorted(cell.elems):
-                yield cell, elem
+        yield from ((cell, elem)
+                    for cell in self.unresolved_cells()
+                    for elem in sorted(cell.elems))
 
     # search to see if there is any group where 'elem' appears
     # in only one unresolved cell of that group; if so it is called
@@ -291,7 +319,7 @@ class Sudoku:
 
         for gcoords in self.geo.allgroups():
             cells_with_elem = [c for c in (self.grid[rc] for rc in gcoords)
-                               if elem in c.elems and not c.resolved]
+                               if c.value is None and elem in c.elems]
             if len(cells_with_elem) == 1:
                 cell = cells_with_elem[0]
                 return CellMove(cell.row, cell.col, elem)
@@ -313,7 +341,7 @@ class Sudoku:
 
         # redundant moves happen when prior moves rendered this move
         # a no-up via kills and inferences. Allow for that.
-        if cell.resolved and cell.value == m.elem:
+        if cell.value == m.elem:
             return
 
         self._valid = None             # force revalidation next time
@@ -357,11 +385,11 @@ class Sudoku:
         killcells = (self.grid[rc] for rc in self.geo.combinedgroups(row, col))
 
         for cell in killcells:
-            if cell.resolved:      # don't take out the last element!
+            if cell.value is not None:      # don't take out the last element!
                 continue
             cell.remove_element(elem)
             # if this is now resolved, recursively kill based on *this*
-            if cell.resolved:
+            if cell.value is not None:
                 self._kill(cell.row, cell.col, cell.value)
 
     # The human __str__ representation works just fine, and experimentation
@@ -385,6 +413,7 @@ class Sudoku:
         for cell in self.grid.values():
             if cell.row != prevrow and prevrow is not None:
                 s += '\n'
-            s += efmt.format(cell.value if cell.resolved else self.STRDOT)
+            s += efmt.format(cell.value if cell.value is not None
+                             else self.STRDOT)
             prevrow = cell.row
         return s + '\n'

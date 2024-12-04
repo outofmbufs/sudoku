@@ -38,23 +38,20 @@ GroupType = Enum('GroupType', ['ROW', 'COL', 'REGION'])
 
 
 class SudokuGeo:
-    # The first version of this class computed every requested
-    # coordinate grouping on the fly. That turns out to have
-    # a significant (~~20%) performance cost on solving difficult puzzles.
+    # The first version of this class computed every requested coordinate
+    # grouping on the fly. That turns out to be slow enough to matter
+    # when solving deep/difficult puzzle search trees.
     #
-    # This version, with some mind-bindingly ugly init code, pre-constructs
-    # various lookup tables. These reduce all requests such as:
-    #       "get the row, column, region coordinates of this rc"
-    # to a single dictionary lookup.
+    # This version, with some mind-bendingly ugly init code, builds static
+    # lookups and gained about 20% performance from doing that.
     #
 
-    def __init__(self, size, /, *, elements=None, regioninfo):
+    def __init__(self, size, /, *, regioninfo, elements=None):
         self.size = size
-        self.regioninfo = regioninfo
-        self.elements = elements or [str(i+1) for i in range(size)]
+        self.elements = tuple(elements or (str(i+1) for i in range(size)))
 
         # just in case, tuplify the regioninfo
-        self.regioninfo = tuple(tuple(rgn) for rgn in self.regioninfo)
+        self.regioninfo = tuple(tuple(rgn) for rgn in regioninfo)
 
         # map an arbitrary (r, c) tuple to its corresponding region
         self._rc2rgn = {
@@ -93,7 +90,18 @@ class SudokuGeo:
         return itertools.product(range(self.size), range(self.size))
 
 
+#
+# Standard geometry for the normal square puzzles that have a size
+# with an integer square root (i.e., 4x4 or 9x9 or 16x16 etc)
+#
+
 class StandardGeo(SudokuGeo):
+    def __init__(self, size, /):
+        boxsize = isqrt(size)
+        if boxsize * boxsize != size:
+            raise ValueError(f"can't make boxes for {size=}")
+        super().__init__(size, regioninfo=self._makeboxes(boxsize))
+
     def _makeboxes(self, boxsize):
         """Make the regioninfo for default square regions."""
 
@@ -107,9 +115,3 @@ class StandardGeo(SudokuGeo):
                       for j in range(cx, cx + boxsize)))
 
         return tuple(regioninfo)
-
-    def __init__(self, size, /):
-        boxsize = isqrt(size)
-        if boxsize * boxsize != size:
-            raise ValueError(f"can't make boxes for {size=}")
-        super().__init__(size, regioninfo=self._makeboxes(boxsize))
