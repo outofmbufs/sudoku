@@ -316,13 +316,20 @@ class Sudoku:
     # Returns False if no singletons for 'elem' are found.
 
     def deduce_a_singleton(self, elem):
-
+        # NOTE: this had been written with comprehensions but this
+        #       explicit looping makes it possible to fail faster
+        #       which speeds up the solution search.
         for gcoords in self.geo.allgroups():
-            cells_with_elem = [c for c in (self.grid[rc] for rc in gcoords)
-                               if c.value is None and elem in c.elems]
-            if len(cells_with_elem) == 1:
-                cell = cells_with_elem[0]
-                return CellMove(cell.row, cell.col, elem)
+            savedcell = None
+            for cell in (self.grid[rc] for rc in gcoords):
+                if cell.value is None and elem in cell.elems:
+                    if savedcell:
+                        savedcell = None
+                        break
+                    savedcell = cell
+
+            if savedcell:
+                return CellMove(savedcell.row, savedcell.col, elem)
         return None
 
     def move(self, m, /, *, autosolve=False):
