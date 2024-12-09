@@ -29,6 +29,8 @@
 
 import itertools
 from collections import namedtuple
+from types import SimpleNamespace
+from saverestore import SSRAttrs, AttrSpec
 import time
 
 
@@ -49,13 +51,16 @@ class PuzzleSolver:
                           prior to time expiration.
     """
 
-    STATS = namedtuple('PuzzleStatistics',
+    Stats = namedtuple('PuzzleStatistics',
                        ['maxq', 'iterations', 'moves', 'elapsed'])
 
-    def _solve(self, puzzle, /, *, timelimit, timecheckevery):
+    def __init__(self, /, **kwargs):
+        self.progress_controls(**kwargs)
+
+    def _solve(self, puzzle):
         """Arbitrary puzzle search/solver. This is the GENERATOR.
 
-        Returns a list of moves which is a puzzle solution, or None.
+        Generates an iterable of moves which is a puzzle solution, or None.
 
         The puzzle must have the following methods:
 
@@ -126,11 +131,10 @@ class PuzzleSolver:
 
         statetrail = {puzzle.canonicalstate()}
 
-        self._maxq = 0
-        self._moves = 0
-        t0 = time.time()
-        q = [(puzzle, [])]      # state queue: [(puzzle, trail), ...]
-        for self._iterations in itertools.count(1):
+        self.progress_start()
+        self._c.maxq = 0
+        q = [(puzzle, [])]        # state queue: [(puzzle, trail), ...]
+        for self._c.iterations in itertools.count(1):
             try:
                 z, movetrail = q.pop(0)
             except IndexError:
@@ -138,10 +142,7 @@ class PuzzleSolver:
                 return
 
             for move in z.legalmoves():
-                self._moves += 1
-                if self._moves % timecheckevery == 0:
-                    if time.time() - t0 > timelimit:
-                        raise TimeLimitExceeded()
+                self.progress()
                 z2 = z.copy_and_move(move)
                 z2state = z2.canonicalstate()
                 if z2state not in statetrail:
@@ -151,57 +152,81 @@ class PuzzleSolver:
                         statetrail.add(z2state)
                         mx = (z2, movetrail + [move])
                         q.append(mx)
-                        self._maxq = max(self._maxq, len(q))
+                        self._c.maxq = max(self._c.maxq, len(q))
 
-    def solve(self, puzzle, /, *, n=1, timelimit=1e21, timecheckevery=100):
-        """Solve the puzzle, return n solutions (by default: 1)
+    def solve(self, puzzle, /, *, n=1, timelimit=None, checkinterval=None):
+        """Solve the puzzle, generate n solutions
 
-        If n <= 0 then return ALL solutions.
-        If n == 1 return the first ("best") solution
-        If n > 1 return n solutions a sequences of up to n solutions;
-                 there might be fewer of course.
+        If n <= 0 then search for ALL solutions.
+        If n == 1 stop after finding the first ("best") solution
+        If n > 1 limit the search to at most n solutions
 
         NOTE: timelimit applies to *each* solution separately if n > 1
         """
 
-        self.entiretree = False
-        self.timedout = False
-
-        g = self._solve(
-            puzzle, timelimit=timelimit, timecheckevery=timecheckevery)
-        self.solutions = []
-        if n <= 0:
-            counter = itertools.count()
+        # searching for all solutions, or just n
+        limiter = range(n) if n > 0 else itertools.count()
+        try:
+            yield from (sol for _, sol in zip(limiter, self._solve(puzzle)))
+        except TimeLimitExceeded:
+            pass
         else:
-            counter = range(n)
+            self.entiretree = True
 
-        t0 = time.time()
-        for i in counter:
-            try:
-                sol = next(g)
-            except StopIteration:
-                self.entiretree = True
-                break
-            except TimeLimitExceeded:
-                self.timedout = True
-                break
-            else:
-                self.solutions.append(sol)
-
-        self._elapsed = time.time() - t0
-        if n == 1:
-            if len(self.solutions) == 1:
-                return self.solutions[0]    # return it naked, not in a list
-            else:
-                return None
-        else:
-            return self.solutions           # return the list
+        self._c.elapsed = time.time() - self._c.t0
 
     @property
     def stats(self):
         """miscellaneous statistics attribute."""
-        d = {s: getattr(self, '_' + s, 0) for s in self.STATS._fields}
-        return self.STATS(**d)
+        d = {s: getattr(self._c, s, 0) for s in self.Stats._fields}
+        return self.Stats(**d)
+
+    # There's a whole bunch of 'clutter' related to logging, time limits,
+    # keeping track of various statistics, etc. All that is encapsulated in:
+    #    progress_controls (initializing all that)
+    #    progress_start    (initializing per-solve stuff)
+    #    progress          (called once per iteration of the search)
+    #
+    def progress_controls(self, /, *,
+                          timelimit=1e21, checkinterval=100,
+                          logger=None, loginterval=1000):
+
+        if logger is not None:
+            checkinterval = min(checkinterval, loginterval)
+
+        self._c = SimpleNamespace(
+            timelimit=timelimit,
+            checkinterval=checkinterval,
+            dflt_timelimit=timelimit,
+            dflt_checkinterval=checkinterval,
+            logger=logger,
+            loginterval=loginterval,
+            maxq=0,
+            moves=0)
+
+    def progress_start(self, /, *, timelimit=None, checkinterval=None):
+        if timelimit is None:
+            timelimit = self._c.dflt_timelimit
+        if checkinterval is None:
+            checkinterval = self._c.dflt_checkinterval
+        if self._c.logger is not None:
+            checkinterval = min(checkinterval, loginterval)
+
+        self._c.timelimit = timelimit
+        self._c.checkinterval = checkinterval
+        self.timedout = False
+        self.entiretree = False
+        self._c.t0 = time.time()
+
+    def progress(self):
+        self._c.moves += 1
+        if self._c.moves % self._c.checkinterval == 0:
+            self._c.elapsed = time.time() - self._c.t0
+            if self._c.elapsed > self._c.timelimit:
+                self.timedout = True
+                raise TimeLimitExceeded()
+            if self._c.logger and self._c.moves % self._c.loginterval == 0:
+                self._c.logger.info(f"{self.stats}")
 
 
 if __name__ == "__main__":
