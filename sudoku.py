@@ -168,7 +168,6 @@ class Cell:
 
         return self.__class__.__name__ + f"({self.row}, {self.col}, {elems})"
 
-
 class Sudoku:
 
     # Create a Sudoku puzzle. The 'givens' are a list of strings such as:
@@ -282,6 +281,11 @@ class Sudoku:
     def resolved_cells(self):
         return itertools.filterfalse(
             lambda c: c.value is None, self.grid.values())
+
+    def unsolved_elems(self):
+        """Return a sequence of elements that are not fully solved."""
+        return [k for k, v in itertools.filterfalse(
+            lambda kv: kv[1] == self.geo.size, self.knowns.items())]
 
     def legalmoves(self):
         """Generate all potential legal moves."""
@@ -459,14 +463,27 @@ class Sudoku:
     # and so none of the other possibilities are live.
     #
     def find_doublepairs(self):
-        for a, b in itertools.product(self.geo.elements, repeat=2):
-            abcells = self.find_a_doublepair(a, b)
-            if abcells:
-                for cell in abcells:
-                    for elem in self.geo.elements:
-                        if elem not in (a, b) and elem in cell.elems:
-                            cell.remove_element(elem)
-                return True
+
+        # If there are any solved elements don't include them in the search
+        unsolved_elems = self.unsolved_elems()
+        nelems = len(unsolved_elems)
+
+        # Because (a, b) is the same as (b, a) as a double pair, and
+        # because (a, a) must be excluded... nested loops like this:
+        for i, a in enumerate(unsolved_elems):
+            for b in unsolved_elems[i+1:]:
+                abcells = self.find_a_doublepair(a, b)
+                if abcells:
+                    for cell in abcells:
+                        for elem in unsolved_elems:
+                            if elem not in (a, b) and elem in cell.elems:
+                                cell.remove_element(elem)
+                        # sanity check but remove this later
+                        assert len(cell.elems) == 2, "XXX 1"
+                        assert a in cell.elems, "XXX a"
+                        assert b in cell.elems, "XXX b"
+
+                    return True
         return False
 
     def find_a_doublepair(self, a, b):
@@ -554,38 +571,6 @@ class Sudoku:
                              if (r, cpp) not in rgn)
 
         return []
-
-    def _region_pointers(self, rgn):
-        #
-        # A pointing "pair" (NOTE: Can definitely be more than just 2 elems)
-        # is any element in a given region that:
-        #     1) Has more than 1 possibility in that region
-        #     2) those possibilities are all on the same row or column
-        #
-        # Whichever row or column the elements all lie on is called
-        # the "pointer". The significance of the pointer is that since
-        # the element must appear *somewhere* in the region, it therefore
-        # cannot appear anywhere else in the same group as the pointer.
-        # Example: if a region has two 3's as possibilities and they are on
-        # the same ROW within the region, 3's can then be eliminated from
-        # that ROW entirely outside of the region.
-
-        # So what this code does is return a sequence of tuples,
-        # each inner tuple being: (group-type, i, elem) indicating that
-        # the element can be eliminated from all positions outside
-        # the region in the i'th group-type (e.g., i'th row or col)
-
-        # XXX THIS IS PROBABLY VERY SLOW, JUST LET'S GET STARTED
-        # Step 1: build a dict elem_cells where elem_cells[i] is a list
-        #         of coordinates within the region that possibly contain i
-        elem_cells = defaultdict(list)
-        for elem in self.geo.elements:
-            pass
-        # step 2: if there are at least 2 cells for a given element
-        #         and they all have a common row or common column,
-        #         that's a region pointer!
-
-        return elem_cells
 
     # The human __str__ representation works just fine, and experimentation
     # shows that performance (and size) here don't seem to matter.
