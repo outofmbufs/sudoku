@@ -330,7 +330,8 @@ class Sudoku:
     def heuristic_order(self):
         unresolveds = list(self.unresolved_cells())
         elemsort = (
-            k for k, v in sorted(self.knowns.items(), key=lambda t: t[1]))
+            k for k, v in sorted(self.knowns.items(), key=lambda t: t[1])
+            if self.knowns[k] < self.geo.size)
         for elem in elemsort:
             haselem = list(
                 itertools.filterfalse(
@@ -340,9 +341,9 @@ class Sudoku:
                 if not cell.value:
                     yield (cell, elem)
                 unresolveds.remove(cell)
-        for c in unresolveds:
-            if not cell.value:
-                raise AlgorithmFailure("H")
+        # sanity check
+        if any(c.value is None for c in unresolveds):
+            raise AlgorithmFailure("H")
 
     # NOT USED; preserved here for reference
     def old_simple_heuristic_order(self):
