@@ -30,7 +30,6 @@
 import itertools
 from collections import namedtuple
 from types import SimpleNamespace
-from saverestore import SSRAttrs, AttrSpec
 import time
 
 
@@ -41,24 +40,27 @@ class TimeLimitExceeded(Exception):
 class PuzzleSolver:
     """ps = PuzzleSolver()
 
-       ps.solve(puzzle) - return a move sequence, or None, to solve puzzle.
+       ps.solve_n(puzzle) - generates an iterable of solutions. Each solution
+                            is a sequence of moves.
+       ps.solve(puzzle)   - sugar around solve_n when exactly one solution
+                            is desired/expected. Returns a sequence of moves.
+                            Raises TimeLimitExceeded if a timeout happens.
+       ps.stats           - miscellaneous statistics
 
-       ATTRIBUTES only valid after a solve():
-       ps.stats         - miscellaneous statistics, only valid after solve()
-       ps.entiretree    - If True, the *entire* search tree was explored
-       ps.timedout      - If True, the timelimit aborted the search.
-                          See ps.solutions for any solutions discovered
-                          prior to time expiration.
+       ATTRIBUTES only valid after solve_n() terminates or solve() returns:
+       ps.timedout        - set in solve_n if the timelimit was exceeded.
     """
 
-    Stats = namedtuple('PuzzleStatistics',
-                       ['maxq', 'iterations', 'moves', 'elapsed'])
+    Stats = namedtuple('Stats', ['maxq', 'moves', 'elapsed'])
 
     def __init__(self, /, **kwargs):
+        # args all pertain to how often to log, timelimits, etc...
         self.progress_controls(**kwargs)
 
     def _solve(self, puzzle):
-        """Arbitrary puzzle search/solver. This is the GENERATOR.
+        """Arbitrary puzzle search/solver. This is a GENERATOR.
+
+        Usually invoked via solve_n or solve1
 
         Generates an iterable of moves which is a puzzle solution, or None.
 
@@ -131,49 +133,67 @@ class PuzzleSolver:
 
         statetrail = {puzzle.canonicalstate()}
 
-        self.progress_start()
-        self._c.maxq = 0
         q = [(puzzle, [])]        # state queue: [(puzzle, trail), ...]
-        for self._c.iterations in itertools.count(1):
+        while True:
             try:
                 z, movetrail = q.pop(0)
-            except IndexError:
-                # no solution was found
+            except IndexError:    # end of q; no (more) solution(s) found
                 return
 
+            # fan out the next ply of moves for this puzzle state (z)
             for move in z.legalmoves():
-                self.progress()
+                self.progress(q=q)
                 z2 = z.copy_and_move(move)
                 z2state = z2.canonicalstate()
                 if z2state not in statetrail:
                     if z2.endstate:
+                        self.progress(q=q, done=True)
                         yield movetrail + [move]
                     else:
                         statetrail.add(z2state)
                         mx = (z2, movetrail + [move])
                         q.append(mx)
-                        self._c.maxq = max(self._c.maxq, len(q))
 
-    def solve(self, puzzle, /, *, n=1, timelimit=None, checkinterval=None):
+    def solve_n(self, puzzle, /, *, n=1, timelimit=None, checkinterval=None):
         """Solve the puzzle, generate n solutions
 
-        If n <= 0 then search for ALL solutions.
-        If n == 1 stop after finding the first ("best") solution
-        If n > 1 limit the search to at most n solutions
+        If n < 0 then search for ALL solutions.
+        If n >= 0 limit the search to at most n solutions
 
-        NOTE: timelimit applies to *each* solution separately if n > 1
+        Raises TimeLimitExceeded if the timelimit is exceeded.
+
+        NOTE: timelimit applies to *each* solution separately.
         """
 
-        # searching for all solutions, or just n
-        limiter = range(n) if n > 0 else itertools.count()
-        try:
-            yield from (sol for _, sol in zip(limiter, self._solve(puzzle)))
-        except TimeLimitExceeded:
-            pass
-        else:
-            self.entiretree = True
+        self.progress_start(timelimit=timelimit, checkinterval=checkinterval)
 
-        self._c.elapsed = time.time() - self._c.t0
+        # this ...
+        limiter = itertools.repeat(None) if n < 0 else range(n)
+
+        # ... is fed into zip() along with the _solve generator, only because
+        # that conveniently creates a loop that will terminate on the shorter
+        # of either of those conditions. In other words, either:
+        #        n solutions were found (if n > 0)
+        #     OR _solve() terminated (reached end of search tree)
+        try:
+            for _, sol in zip(limiter, self._solve(puzzle)):
+                self._c.elapsed = time.time() - self._c.t0
+                yield sol
+        except TimeLimitExceeded:
+            self.timedout = True
+        else:
+            self.timedout = False
+
+    def solve1(self, puzzle, /, **kwargs):
+        """Return sequence of moves, or None. Can raise TimeLimitExceeded."""
+        try:
+            moves = next(self.solve_n(puzzle, **kwargs))
+        except StopIteration:
+            if self.timedout:
+                raise TimeLimitExceeded
+            return None
+        else:
+            return moves
 
     @property
     def stats(self):
@@ -194,6 +214,7 @@ class PuzzleSolver:
         if logger is not None:
             checkinterval = min(checkinterval, loginterval)
 
+        # collect all this junk into a namespace on general principles
         self._c = SimpleNamespace(
             timelimit=timelimit,
             checkinterval=checkinterval,
@@ -210,20 +231,21 @@ class PuzzleSolver:
         if checkinterval is None:
             checkinterval = self._c.dflt_checkinterval
         if self._c.logger is not None:
-            checkinterval = min(checkinterval, loginterval)
+            checkinterval = min(checkinterval, self._c.loginterval)
 
         self._c.timelimit = timelimit
         self._c.checkinterval = checkinterval
-        self.timedout = False
-        self.entiretree = False
+        self._c.moves = 0
+        self._c.maxq = 0
         self._c.t0 = time.time()
 
-    def progress(self):
+    def progress(self, /, *, q, done=False):
         self._c.moves += 1
-        if self._c.moves % self._c.checkinterval == 0:
+        self._c.elapsed = time.time() - self._c.t0
+        self._c.maxq = max(self._c.maxq, len(q))
+        if done or self._c.moves % self._c.checkinterval == 0:
             self._c.elapsed = time.time() - self._c.t0
             if self._c.elapsed > self._c.timelimit:
-                self.timedout = True
                 raise TimeLimitExceeded()
             if self._c.logger and self._c.moves % self._c.loginterval == 0:
                 self._c.logger.info(f"{self.stats}")
@@ -270,18 +292,18 @@ if __name__ == "__main__":
     class TestMethods(unittest.TestCase):
         def test1(self):
             ps = PuzzleSolver()
-            difficulty = ps.stats.iterations
+            difficulty = ps.stats.moves
 
             # this is a weak test but it is what it is.
             for puzzlesize in range(1, 9):
                 with self.subTest(puzzlesize=puzzlesize):
                     h = TowerOfHanoi(ndiscs=puzzlesize)
-                    s = ps.solve(h)
+                    s = ps.solve1(h)
                     self.assertEqual(len(s), (2**puzzlesize)-1)
 
-                    # the difficulty, arbitrarily defined as the iterations
-                    # in the stats, should increase with puzzle size
-                    self.assertTrue(ps.stats.iterations > difficulty)
-                    difficulty = ps.stats.iterations
+                    # the difficulty, arbitrarily defined as the number
+                    # of moves examined, should increase with puzzle size
+                    self.assertTrue(ps.stats.moves > difficulty)
+                    difficulty = ps.stats.moves
 
     unittest.main()

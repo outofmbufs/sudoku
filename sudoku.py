@@ -22,7 +22,7 @@
 
 import copy
 import itertools
-from collections import namedtuple
+from collections import namedtuple, defaultdict
 
 from sudokugeo import StandardGeo
 
@@ -115,20 +115,58 @@ class Cell:
 
         Is a no-op if the element has already been removed.
         Raises RuleViolation if that leaves no choices at all.
+
+        Returns True if the cell had 2 possibilities, elem being one of them
+        (in other words: returns True if this makes the cell 'resolve')
         """
-        if elem in self.elems:
-            if len(self.elems) == 1:
-                raise RuleViolation(f"row={self.row}, col={self.col}")
-            self.elems -= {elem}    # NOTE: this makes a *new* frozenset
-            if len(self.elems) == 1:
-                self.value = list(self.elems)[0]
+        if elem not in self.elems:       # a no-op
+            return False
+
+        if len(self.elems) == 1:
+            raise RuleViolation(f"dead cell ({self.row}, {self.col})")
+        self.elems -= {elem}    # NOTE: this makes a *new* frozenset
+        if len(self.elems) > 1:
+            return False
+        self.value = list(self.elems)[0]
+        return True
 
     def resolve(self, elem):
         """Make the cell be specifically the given elem."""
         if elem not in self.elems:
             raise RuleViolation(f"Can't set {elem} @ ({self.row}, {self.col})")
-        self.elems = frozenset({elem})
-        self.value = elem
+        if self.value != elem:    # avoid unneeded garbage
+            self.elems = frozenset({elem})
+            self.value = elem
+            return True        # means it just got resolved
+        return False           # means it was already resolved
+
+    def __repr__(self):
+        # this is a hack but it really helps for debugging.. if the
+        # elements are all single-character strings, mash them all
+        # together in the repr because that would be a valid Cell() call.
+        #
+        # So, for normal puzzles that are 9x9 and have elements '1' .. '9'
+        # the repr would be, e.g.
+        #
+        #       Cell(0, 0, '123456789')
+        #
+        # instead of
+        #
+        #       Cell(0, 0, ['1', '2', '3', '4', '5', '6', '7', '8', '9'])
+        #
+        try:
+            elems = ''.join(sorted(self.elems))
+        except TypeError:
+            elems = None
+        else:
+            if len(elems) != len(self.elems):
+                elems = None
+            else:
+                elems = repr(elems)
+        if elems is None:
+            elems = list(sorted(self.elems))
+
+        return self.__class__.__name__ + f"({self.row}, {self.col}, {elems})"
 
 
 class Sudoku:
@@ -162,6 +200,7 @@ class Sudoku:
         }
 
         self.__cached = None    # see legalmoves() and copy_and_move()
+        self.knowns = {elem: 0 for elem in self.geo.elements}
 
         # Process any initial given cells
         for r, row in enumerate(givens):
@@ -208,6 +247,7 @@ class Sudoku:
         #
         s2 = copy.copy(self)
         s2.grid = {rc: Cell(*rc, c.elems) for rc, c in self.grid.items()}
+        s2.knowns = dict(self.knowns)
         return s2
 
     # Attribute (property) .valid is True if the puzzle conforms to
@@ -250,9 +290,19 @@ class Sudoku:
 
         # Brute force: Try each candidate in each cell, in order.
         # The combinatoric explosion here would be enormous; however,
-        # the 'kills' and deducing singletons dramatically limit that.
-        # In practice a "bad" move is discovered quickly enough that
-        # even the hardest puzzles can be solved in ~~10000 evaluations.
+        # 'kills' and various solving strategies dramatically limit that.
+        #
+        # There is an optimization: to determine if something is a
+        # a legal move, it has to actually be made (and chased with
+        # all of its kills/etc). That's expensive, and after this legal
+        # move is returned the solving framework will turn right back
+        # around and say "ok, do that move". The __cached attribute
+        # allows the work done here to find the move to be used when/if
+        # the move is then immediately used.
+        #
+        # To preserve semantics all methods that mutate self (puzzle state)
+        # must maintain (usually that means: clear) the __cached attribute.
+        # See, for example move().
 
         for cell, elem in self.heuristic_order():
             move = CellMove(cell.row, cell.col, elem)
@@ -263,16 +313,41 @@ class Sudoku:
             else:
                 yield move
 
+    # The heuristic_order is used in legalmoves and determines the order
+    # in which cells and elements will be fed to the search framework.
+    #
+    # This heuristic sorts the elements by how many cells they appear in
+    # as possibilities, fewest first, and thus yields (cell, elem) pairs
+    # favoring "nearly solved" elements before elements that have myriad
+    # possibilities all over the puzzle. This seems (albeit with scant data
+    # points) to reduce the search space, and mimics what people often
+    # do: "let's see if we can set the rest of the remaining sixes"
+    #
+    def heuristic_order(self):
+        unresolveds = list(self.unresolved_cells())
+        elemsort = (
+            k for k, v in sorted(self.knowns.items(), key=lambda t: t[1]))
+        for elem in elemsort:
+            haselem = list(
+                itertools.filterfalse(
+                    lambda c: elem not in c.elems,
+                    unresolveds))
+            for cell in haselem:
+                if not cell.value:
+                    yield (cell, elem)
+                unresolveds.remove(cell)
+        for c in unresolveds:
+            if not cell.value:
+                raise AlgorithmFailure("H")
+
+    # NOT USED; preserved here for reference
+    def old_simple_heuristic_order(self):
+        yield from ((cell, elem)
+                    for cell in self.unresolved_cells()
+                    for elem in sorted(cell.elems))
+
     def copy_and_move(self, m):
-
-        # About caching: (__cached) ... When the puzzlesolver is driving
-        # legalmoves/copy_and_move, what happens is legalmoves has to
-        # dry-run copy_and_move() to make sure it is not yielding an
-        # illegal move (which fouls the search algorithm). The solver
-        # immediately sends that same move right back to copy_and_move,
-        # so this simple cache strategy is nearly a 2x speed optimization.
-        # Note that move() also invalidates this cache to preserve semantics.
-
+        # See legalmoves for discussion of __cached
         try:
             cached_m, cached_obj = self.__cached
         except TypeError:             # __cached was None
@@ -282,39 +357,81 @@ class Sudoku:
         if cached_m == m:
             return cached_obj
 
-        # otherwise, really have to do the copy
+        # otherwise, really have to do the copy, and the move
         s2 = copy.deepcopy(self)
         s2.move(m, autosolve=True)
         return s2
 
-    # The heuristic_order is used in legalmoves and determines the order
-    # in which cells and elements will be fed to the search framework.
-    # This can be overridden in subclasses to experiment; this default
-    # version simply examines all cells/elements in order.
-    #
-    # Two things to note:
-    #   1) cell.elems is a frozenset and the ordering will vary.
-    #      The call to sorted() has no measurable effect on performance
-    #      but brings the advantage of predictable/unvarying results.
-    #      If it is taken out everything still works; however, runs in
-    #      two different python interpreter instances will explore the
-    #      search space in different orders.
-    #   2) As of this writing, no heuristic tried has performed
-    #      better than "just do them in order".
-    def heuristic_order(self):
-        yield from ((cell, elem)
-                    for cell in self.unresolved_cells()
-                    for elem in sorted(cell.elems))
+    def move(self, m, /, *, autosolve=False):
+        """Perform a CellMove on the puzzle, in-place.
 
-    # search to see if there is any group where 'elem' appears
+        If autosolve is True (default is False) then the any moves
+        unambiguously implied by the resulting puzzle state will be
+        automatically made. NOTE: This often solves a LOT of cells.
+
+        Raises RuleViolation if the move is illegal (or if any
+        autosolve moves lead to a contradition)
+        """
+        cell = self.grid[(m.row, m.col)]
+        if m.elem not in cell.elems:
+            raise RuleViolation(f"{m} element is not a candidate")
+
+        self.__cached = None           # see legalmoves/copy_and_move
+        self._valid = None             # force revalidation next time
+        if cell.resolve(m.elem):       # this is THE element here now
+            self.knowns[m.elem] += 1
+
+        if autosolve:
+            self._autosolve(m)
+
+    def _autosolve(self, m, /):
+        """Given a just-made move m, resolve everything it implies."""
+
+        # Remove this element from other cells in immediate groups
+        self._kill(m.row, m.col, m.elem)
+
+        if not self.valid:
+            raise RuleViolation("POST-KILL")
+
+        # keep looping over singletons until none are found.
+        strategies = (self.find_singletons,
+                      self.find_pointingpairs,
+                      self.find_doublepairs)
+        while True:
+            if not any(strategy() for strategy in strategies):
+                break
+
+    # KILLing simply means if, for example, a '5' was placed at (0, 0)
+    # then a '5' cannot be anywhere else in row 0, column 0, or region 0.
+    # During a kill, if removing the element from a cell resolves *that*
+    # cell (i.e., it had two possibilities but now has only 1) then the
+    # kill is recursively carried out accordingly. In many cases the entire
+    # puzzle will end up resolving from cascading kills.
+    def _kill(self, row, col, elem):
+        # the OTHER cells of every group this (row, col) cell is in
+        this = self.grid[(row, col)]         # excluded from killcells
+        killcells = itertools.filterfalse(
+            lambda c: c is this,
+            (self.grid[rc] for rc in self.geo.combinedgroups(row, col)))
+
+        for cell in killcells:
+            if cell.remove_element(elem):
+                # this is now resolved, so recursively kill!
+                self.knowns[cell.value] += 1
+                self._kill(cell.row, cell.col, cell.value)
+
+    def find_singletons(self):
+        for elem in self.geo.elements:
+            singleton_m = self.deduce_a_singleton(elem)
+            if singleton_m:
+                self.move(singleton_m, autosolve=True)
+                return True
+        return False
+
+    # Search to see if there is any group where 'elem' appears
     # in only one unresolved cell of that group; if so it is called
     # (here) a "singleton" and it can be immediately resolved.
     #
-    # Returns True if a singleton is found. NOTE that JUST THAT ONE
-    # singleton is processed. See how this is looped around in move().
-    #
-    # Returns False if no singletons for 'elem' are found.
-
     def deduce_a_singleton(self, elem):
         # NOTE: this had been written with comprehensions but this
         #       explicit looping makes it possible to fail faster
@@ -332,72 +449,143 @@ class Sudoku:
                 return CellMove(savedcell.row, savedcell.col, elem)
         return None
 
-    def move(self, m, /, *, autosolve=False):
-        """Perform a CellMove on the puzzle, in-place.
+    #
+    # A double-pair is a pair of elements (a, b) appearing in EXACTLY two
+    # cells as possibilities in any group.
+    #
+    # While this doesn't allow resolving those cells, it *does* mean that
+    # any other possibilities in that pair of cells can be eliminated,
+    # because whichever one 'a' ends up in, 'b' will end up in the other
+    # and so none of the other possibilities are live.
+    #
+    def find_doublepairs(self):
+        for a, b in itertools.product(self.geo.elements, repeat=2):
+            abcells = self.find_a_doublepair(a, b)
+            if abcells:
+                for cell in abcells:
+                    for elem in self.geo.elements:
+                        if elem not in (a, b) and elem in cell.elems:
+                            cell.remove_element(elem)
+                return True
+        return False
 
-        If autosolve is True (default is False) then the any moves
-        unambiguously implied by the resulting puzzle state will be
-        automatically made. NOTE: This often solves a LOT of cells.
+    def find_a_doublepair(self, a, b):
+        if a == b:
+            return None
+        for gcoords in self.geo.allgroups():
+            abcells = []
+            for cell in (self.grid[rc] for rc in gcoords):
+                has_a = a in cell.elems
+                has_b = b in cell.elems
+                if (has_a and not has_b) or (has_b and not has_a):
+                    abcells = []
+                    break
+                if has_a and has_b:
+                    if len(abcells) == 2:    # means this is the third
+                        abcells = []         # which is too many
+                        break
+                    else:
+                        abcells.append(cell)
 
-        Raises RuleViolation if the move is illegal (or if any
-        autosolve moves lead to a contradition)
+            if len(abcells) == 2:
+                # check to make sure there's something else to eliminate
+                if any(map(lambda c: len(c.elems) > 2, abcells)):
+                    return abcells
+
+        return None
+
+    #
+    # A pointing "pair" is any element in a given region that:
+    #     1) Has more than 1 possibility in that region
+    #     2) those possibilities are all on the same row or column
+    #
+    # Whichever row or column the elements all lie on is called
+    # the "pointer". The significance of the pointer is that since
+    # the element must appear *somewhere* in the region, it therefore
+    # cannot appear anywhere else in the same group as the pointer.
+    # Example: if a region has two 3's as possibilities and they are on
+    # the same ROW within the region, 3's can then be eliminated from
+    # that ROW entirely outside of the region.
+
+    def find_pointingpairs(self):
+        for elem in self.geo.elements:
+            for rc in self.find_a_pointing_pair(elem):
+                cell = self.grid[rc]
+                if cell.remove_element(elem):
+                    # striking this one resolved the cell, so
+                    # recursively invoke all the move() magic again
+                    self.move(CellMove(*rc, cell.value), autosolve=True)
+                    return True
+        return False
+
+    # A seqeunce of coordinates is a pointing pair if:
+    #      All the rows are the same OR All the columns are the same
+    #  AND there are at least 2 coordinates
+    #
+    def is_pp(self, elem, coords):
+        """Return pointing pair info as a tuple (row, col).
+
+        If the row is NOT a "pointing pair" row is None (else the row)
+        Same for col.
+
+        Note that "pointing pairs" have at least 2 coordinates but can
+        have any number. But "pair" is the sudoku terminology regardless.
         """
-        cell = self.grid[(m.row, m.col)]
-        if m.elem not in cell.elems:
-            raise RuleViolation(f"{m} element is not a candidate")
+        rows = [r for r, c in coords]
+        cols = [c for r, c in coords]
+        row_pp = len(rows) > 1 and len(set(rows)) == 1
+        col_pp = len(cols) > 1 and len(set(cols)) == 1
+        return rows[0] if row_pp else None, cols[0] if col_pp else None
 
-        # redundant moves happen when prior moves rendered this move
-        # a no-up via kills and inferences. Allow for that.
-        if cell.value == m.elem:
-            return
+    # Find any single "pointing pair" in a region.
+    def find_a_pointing_pair(self, elem):
+        for rgn in self.geo.regioninfo:
+            coords = tuple(rc for rc in rgn if elem in self.grid[(rc)].elems)
+            rpp, cpp = self.is_pp(elem, coords)
+            if rpp is not None:
+                # convert from just the row number to a list of all the
+                # coordinates on this row, but NOT in the region
+                return tuple((rpp, c)
+                             for c in range(self.geo.size)
+                             if (rpp, c) not in rgn)
+            elif cpp is not None:
+                return tuple((r, cpp)
+                             for r in range(self.geo.size)
+                             if (r, cpp) not in rgn)
 
-        self._valid = None             # force revalidation next time
-        self.__cached = None           # see legalmoves/copy_and_move
-        cell.resolve(m.elem)           # this is THE element here now
+        return []
 
-        if autosolve:
-            self._autosolve(m)
+    def _region_pointers(self, rgn):
+        #
+        # A pointing "pair" (NOTE: Can definitely be more than just 2 elems)
+        # is any element in a given region that:
+        #     1) Has more than 1 possibility in that region
+        #     2) those possibilities are all on the same row or column
+        #
+        # Whichever row or column the elements all lie on is called
+        # the "pointer". The significance of the pointer is that since
+        # the element must appear *somewhere* in the region, it therefore
+        # cannot appear anywhere else in the same group as the pointer.
+        # Example: if a region has two 3's as possibilities and they are on
+        # the same ROW within the region, 3's can then be eliminated from
+        # that ROW entirely outside of the region.
 
-    def _autosolve(self, m, /):
-        """Given a just-made move m, resolve everything it implies."""
+        # So what this code does is return a sequence of tuples,
+        # each inner tuple being: (group-type, i, elem) indicating that
+        # the element can be eliminated from all positions outside
+        # the region in the i'th group-type (e.g., i'th row or col)
 
-        # Remove this element from other cells in immediate groups
-        self._kill(m.row, m.col, m.elem)
+        # XXX THIS IS PROBABLY VERY SLOW, JUST LET'S GET STARTED
+        # Step 1: build a dict elem_cells where elem_cells[i] is a list
+        #         of coordinates within the region that possibly contain i
+        elem_cells = defaultdict(list)
+        for elem in self.geo.elements:
+            pass
+        # step 2: if there are at least 2 cells for a given element
+        #         and they all have a common row or common column,
+        #         that's a region pointer!
 
-        if not self.valid:
-            raise RuleViolation("KILL CONFLICT")
-
-        # keep looping over singletons until none are found.
-        while True:
-            for elem in self.geo.elements:
-                singleton_m = self.deduce_a_singleton(elem)
-                if singleton_m is not None:
-                    self.move(singleton_m, autosolve=True)
-                    break    # this restarts the 'for' bcs of outer while
-            else:
-                break        # the 'for' found nothing, so all done
-
-        if not self.valid:    # this validate should NEVER fail
-            raise AlgorithmFailure("CODING ERROR")
-
-    # KILLing simply means if, for example, a '5' was placed at (0, 0)
-    # then a '5' cannot be anywhere else in row 0, column 0, or region 0.
-    # During a kill, if removing the element from a cell resolves *that*
-    # cell (i.e., it had two possibilities but now has only 1) then the
-    # kill is recursively carried out accordingly. In many cases the entire
-    # puzzle will end up resolving from cascading kills.
-    def _kill(self, row, col, elem):
-
-        # the cells of every group this (row, col) is in:
-        killcells = (self.grid[rc] for rc in self.geo.combinedgroups(row, col))
-
-        for cell in killcells:
-            if cell.value is not None:      # don't take out the last element!
-                continue
-            cell.remove_element(elem)
-            # if this is now resolved, recursively kill based on *this*
-            if cell.value is not None:
-                self._kill(cell.row, cell.col, cell.value)
+        return elem_cells
 
     # The human __str__ representation works just fine, and experimentation
     # shows that performance (and size) here don't seem to matter.

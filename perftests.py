@@ -1,4 +1,3 @@
-import time
 from sudoku import Sudoku
 from sudokugeo import SudokuGeo
 from solver import PuzzleSolver
@@ -79,7 +78,7 @@ puzzles = [
         iterations=100
     ),
 
-    # This one is very difficult, takes about 12 seconds on typical laptop
+    # This one is difficult, takes about 5 seconds on typical laptop
     TimingTestCase(
         givens=[
             "..9...2..",
@@ -138,7 +137,7 @@ puzzles = [
             "BA835C947126"
         ],
         geo=g12(),
-        iterations=10
+        iterations=50
     ),
 ]
 
@@ -146,42 +145,44 @@ puzzles = [
 def timetest():
     for i, x in enumerate(puzzles):
         puzz = Sudoku(x.givens, geo=x.geo)
+
+        # if the puzzle was simple enough to solve at construction time...
+        if puzz.endstate:
+            print(f"Case {i}: resolved immediately by autosolve rules.")
+            continue
+
         fastest = 1e21              # surely the first will be faster :)
         for _ in range(x.iterations):
             ps = PuzzleSolver()
-            t0 = time.time()
-            moves = next(ps.solve(puzz))
-            elapsed = time.time() - t0
-            fastest = min(fastest, elapsed)
+            moves = ps.solve1(puzz)
+            fastest = min(fastest, ps.stats.elapsed)
 
         # this is a performance test program, not a functional test,
         # but nevertheless test/assert a few things that should be true
-        if not ps.timedout:
+        # 1) carry out the moves that got returned
+        for m in moves:
+            puzz.move(m, autosolve=True)
 
-            # 1) carry out the moves that got returned
-            for m in moves:
-                puzz.move(m, autosolve=True)
+        #    ... which should bring the puzzle to a solution
+        assert puzz.endstate, "Puzzle did not get solved!!"
 
-            #    ... which should bring the puzzle to a solution
-            assert puzz.endstate, "Puzzle did not get solved!!"
+        # 2) verify that solution against the "known" solution
+        for r, row in enumerate(x.solution):
+            for c, elem in enumerate(row):
+                assert puzz.grid[(r, c)].value == elem, "solution mismatch"
 
-            # 2) verify that solution against the "known" solution
-            for r, row in enumerate(x.solution):
-                for c, elem in enumerate(row):
-                    assert puzz.grid[(r, c)].value == elem, "solution mismatch"
-
-        if elapsed < 1.0:
-            estr = f" {elapsed*1000:.2f} milliseconds"
+        if fastest < 1.0:
+            estr = f" {fastest*1000:.2f} milliseconds"
         else:
-            estr = f" {elapsed:.2f} seconds"
+            estr = f" {fastest:.2f} seconds"
 
-        if ps.timedout:
+        if not puzz.endstate:
             mstr = "; no solution found -- timed out."
         elif ps.stats.moves > 10:
-            mstr = f"; {(elapsed / ps.stats.moves)*1000:.2f} msec/move,"
+            mstr = f"; {(fastest / ps.stats.moves)*1000:.2f} msec/move ("
         else:
-            mstr = f"; Only"
-        mstr += f" {ps.stats.moves} moves examined"
+            mstr = f" (only "
+        mstr += f"{ps.stats.moves} examined)"
 
         nsolstr = f"{len(moves)} move"
         if len(moves) != 1:

@@ -60,7 +60,7 @@ class SudokuGeo:
         # map an arbitrary (r, c) tuple to the coordinates of
         # the row, col and region it is part of (one big sequence)
         self._threegc = {}
-        for rc in itertools.product(range(self.size), range(self.size)):
+        for rc in itertools.product(range(self.size), repeat=2):
             row = tuple((rc[0], c) for c in range(self.size))
             col = tuple((r, rc[1]) for r in range(self.size))
             rgn = self.regioninfo[self._rc2rgn[rc]]
@@ -88,6 +88,14 @@ class SudokuGeo:
     # this one is not performance sensitive; used once at init
     def allgrid(self):
         return itertools.product(range(self.size), range(self.size))
+
+    def _region_rcs(self, rgn):
+        region = self.regioninfo[rgn]
+        for rowcol in (0, 1):
+            for x in range(self.size):
+                inrgn = tuple(rc for rc in region if rc[rowcol] == x)
+                if inrgn:
+                    yield inrgn
 
 
 #
