@@ -22,7 +22,7 @@
 
 import copy
 import itertools
-from collections import namedtuple, defaultdict
+from collections import namedtuple, Counter
 
 from sudokugeo import StandardGeo
 
@@ -320,18 +320,49 @@ class Sudoku:
     # The heuristic_order is used in legalmoves and determines the order
     # in which cells and elements will be fed to the search framework.
     #
-    # This heuristic sorts the elements by how many cells they appear in
-    # as possibilities, fewest first, and thus yields (cell, elem) pairs
-    # favoring "nearly solved" elements before elements that have myriad
-    # possibilities all over the puzzle. This seems (albeit with scant data
-    # points) to reduce the search space, and mimics what people often
-    # do: "let's see if we can set the rest of the remaining sixes"
+    # This heuristic sorts the elements by how many spots are yet to be
+    # determined for that element. E.g., in a 9x9 puzzle with three 1's in
+    # the givens there are 6 1's remaining to be determined. There may be
+    # (of course) quite a few possibilities for those, but the sort is by
+    # the number of *answers* to be determined not the number of possibilities.
+    #
+    # With that element order, cells are then examined in order of
+    # how many possibilities they have, most possibilities first.
+    #
+    # Empirically, this seems to reduce the search space, though it is not
+    # known whether that was luck with the test cases or theoretically sound.
     #
     def heuristic_order(self):
         unresolveds = list(self.unresolved_cells())
         elemsort = (
-            k for k, v in sorted(self.knowns.items(), key=lambda t: t[1])
+            k for k, v in sorted(self.knowns.items(), key=lambda t: t[1]))
+        for elem in elemsort:
+            haselem = list(sorted(
+                itertools.filterfalse(
+                    lambda c: elem not in c.elems,
+                    unresolveds),
+                key=lambda c: -len(c.elems)))
+            for cell in haselem:
+                if not cell.value:
+                    yield (cell, elem)
+                unresolveds.remove(cell)
+        # sanity check
+        if any(c.value is None for c in unresolveds):
+            raise AlgorithmFailure("H")
+
+
+    def XXXheuristic_order(self):
+        xxx = """
+        unresolveds = list(self.unresolved_cells())
+        counts = self.count_possibles(candidates=self.unresolved_cells())
+        elemsort = (
+            k for k, v in sorted(self.count_possibles().items(), key=lambda t: -t[1])
             if self.knowns[k] < self.geo.size)
+        """
+
+        unresolveds = list(self.unresolved_cells())
+        elemsort = (
+            k for k, v in sorted(self.knowns.items(), key=lambda t: t[1]))
         for elem in elemsort:
             haselem = list(
                 itertools.filterfalse(
@@ -344,6 +375,16 @@ class Sudoku:
         # sanity check
         if any(c.value is None for c in unresolveds):
             raise AlgorithmFailure("H")
+
+    # support function for heuristic order. How many UNRESOLVED cells
+    # does each element appear in as a possibility.
+    def count_possibles(self, candidates=None):
+        counts = Counter()
+        for cell in candidates or self.grid.values():
+            if cell.value is None:
+                for e in cell.elems:
+                    counts[e] += 1
+        return counts
 
     # NOT USED; preserved here for reference
     def old_simple_heuristic_order(self):
@@ -398,10 +439,12 @@ class Sudoku:
         if not self.valid:
             raise RuleViolation("POST-KILL")
 
-        # keep looping over singletons until none are found.
-        strategies = (self.find_singletons,
-                      self.find_pointingpairs,
-                      self.find_doublepairs)
+        strategies = (
+            self.find_singletons,
+            self.find_pointingpairs,
+            self.find_doublepairs,
+        )
+
         while True:
             if not any(strategy() for strategy in strategies):
                 break
@@ -426,12 +469,13 @@ class Sudoku:
                 self._kill(cell.row, cell.col, cell.value)
 
     def find_singletons(self):
-        for elem in self.geo.elements:
+        found_any = False
+        for elem in self.unsolved_elems():
             singleton_m = self.deduce_a_singleton(elem)
             if singleton_m:
                 self.move(singleton_m, autosolve=True)
-                return True
-        return False
+                found_any = True
+        return found_any
 
     # Search to see if there is any group where 'elem' appears
     # in only one unresolved cell of that group; if so it is called
@@ -526,17 +570,18 @@ class Sudoku:
     # that ROW entirely outside of the region.
 
     def find_pointingpairs(self):
-        for elem in self.geo.elements:
+        found_any = False
+        for elem in self.unsolved_elems():
             for rc in self.find_a_pointing_pair(elem):
                 cell = self.grid[rc]
                 if cell.remove_element(elem):
                     # striking this one resolved the cell, so
                     # recursively invoke all the move() magic again
                     self.move(CellMove(*rc, cell.value), autosolve=True)
-                    return True
-        return False
+                    found_any = True
+        return found_any
 
-    # A seqeunce of coordinates is a pointing pair if:
+    # A sequence of coordinates is a pointing pair if:
     #      All the rows are the same OR All the columns are the same
     #  AND there are at least 2 coordinates
     #
