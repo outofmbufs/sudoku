@@ -78,11 +78,6 @@ class RuleViolation(Exception):
     pass
 
 
-# Raised when an internal sanity-check fails; "should never happen"
-class AlgorithmFailure(Exception):
-    pass
-
-
 # A specific 'move' (i.e., filling in a cell with a known element value)
 CellMove = namedtuple('CellMove', ['row', 'col', 'elem'])
 
@@ -98,47 +93,25 @@ class Cell:
         self.col = col
         self.elems = frozenset(elems)
 
-        # A Cell has a non-None 'value' if it has been determined to be one
-        # specific element. If it still could be one of several elements
-        # then its 'value' attribute will be None.
-        #
-        # The original version of this code used @property to compute the
-        # value attribute from self.elems dynamically. That is simple,
-        # pythonic, and always correct; however, it slows down puzzle
-        # searching by more than 20% difference. Thus, 'value' is instead
-        # updated manually any place that self.elems is modified.
-
-        self.value = list(self.elems)[0] if len(self.elems) == 1 else None
-
     def remove_element(self, elem):
         """Take an element out of the choices for this cell.
 
         Is a no-op if the element has already been removed.
         Raises RuleViolation if that leaves no choices at all.
-
-        Returns True if the cell had 2 possibilities, elem being one of them
-        (in other words: returns True if this makes the cell 'resolve')
         """
         if elem not in self.elems:       # a no-op
-            return False
+            return
 
         if len(self.elems) == 1:
             raise RuleViolation(f"dead cell ({self.row}, {self.col})")
         self.elems -= {elem}    # NOTE: this makes a *new* frozenset
-        if len(self.elems) > 1:
-            return False
-        self.value = list(self.elems)[0]
-        return True
 
     def resolve(self, elem):
         """Make the cell be specifically the given elem."""
         if elem not in self.elems:
             raise RuleViolation(f"Can't set {elem} @ ({self.row}, {self.col})")
-        if self.value != elem:    # avoid unneeded garbage
+        if len(self.elems) > 1:   # avoid unneeded garbage
             self.elems = frozenset({elem})
-            self.value = elem
-            return True        # means it just got resolved
-        return False           # means it was already resolved
 
     def __repr__(self):
         # this is a hack but it really helps for debugging.. if the
@@ -168,6 +141,37 @@ class Cell:
 
         return self.__class__.__name__ + f"({self.row}, {self.col}, {elems})"
 
+
+class SmartCell(Cell):
+    """A Sudoku puzzle is a grid of SmartCells."""
+
+    def __init__(self, sudoku, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.sudoku = sudoku
+
+        # A SmartCell has a non-None 'value' if it has been determined to
+        # be one specific element. If it still could be one of several
+        # elements then its 'value' attribute will be None.
+        self.value = list(self.elems)[0] if len(self.elems) == 1 else None
+
+    def remove_element(self, elem):
+        old_elems = self.elems
+        super().remove_element(elem)
+
+        if self.elems is not old_elems:
+            # something changed, so refresh all the lookasides
+            if self.value is None and len(self.elems) == 1:
+                self.value = list(self.elems)[0]
+                self.sudoku.cell_lookasides['knowns'][self.value] -= 1
+
+    def resolve(self, elem):
+        """Make the cell be specifically the given elem."""
+        if self.value is None:
+            super().resolve(elem)
+            self.value = elem
+            self.sudoku.cell_lookasides['knowns'][elem] -= 1
+
+
 class Sudoku:
 
     # Create a Sudoku puzzle. The 'givens' are a list of strings such as:
@@ -189,17 +193,21 @@ class Sudoku:
 
         self.geo = geo or StandardGeo(9)
 
+        self.__cached = None    # see legalmoves() and copy_and_move()
+        self.cell_lookasides = {}
+        self.cell_lookasides['knowns'] = {
+            elem: self.geo.size for elem in self.geo.elements
+        }
+
         # The grid is a dict of Cell objects, indexed by (row, col) tuple.
         # Each Cell starts out with all possible elements as a potential
         # choice; as the solver progresses each Cell's choices are
         # narrowed until eventually (if the puzzle gets solved) there is
         # only one choice in each individual Cell.
         self.grid = {
-            rc: Cell(*rc, self.geo.elements) for rc in self.geo.allgrid()
+            rc: SmartCell(
+                self, *rc, self.geo.elements) for rc in self.geo.allgrid()
         }
-
-        self.__cached = None    # see legalmoves() and copy_and_move()
-        self.knowns = {elem: 0 for elem in self.geo.elements}
 
         # Process any initial given cells
         for r, row in enumerate(givens):
@@ -245,8 +253,10 @@ class Sudoku:
         #                       more than it "should" about Cells.
         #
         s2 = copy.copy(self)
-        s2.grid = {rc: Cell(*rc, c.elems) for rc, c in self.grid.items()}
-        s2.knowns = dict(self.knowns)
+        s2.grid = {
+            rc: SmartCell(s2, *rc, c.elems) for rc, c in self.grid.items()
+        }
+        s2.cell_lookasides = copy.deepcopy(self.cell_lookasides)
         return s2
 
     # Attribute (property) .valid is True if the puzzle conforms to
@@ -285,7 +295,7 @@ class Sudoku:
     def unsolved_elems(self):
         """Return a sequence of elements that are not fully solved."""
         return [k for k, v in itertools.filterfalse(
-            lambda kv: kv[1] == self.geo.size, self.knowns.items())]
+            lambda kv: kv[1] == 0, self.cell_lookasides['knowns'].items())]
 
     def legalmoves(self):
         """Generate all potential legal moves."""
@@ -335,7 +345,8 @@ class Sudoku:
     def heuristic_order(self):
         unresolveds = list(self.unresolved_cells())
         elemsort = (
-            k for k, v in sorted(self.knowns.items(), key=lambda t: t[1]))
+            k for k, v in sorted(
+                self.cell_lookasides['knowns'].items(), key=lambda t: -t[1]))
         for elem in elemsort:
             haselem = list(sorted(
                 itertools.filterfalse(
@@ -345,36 +356,9 @@ class Sudoku:
             for cell in haselem:
                 if not cell.value:
                     yield (cell, elem)
-                unresolveds.remove(cell)
-        # sanity check
-        if any(c.value is None for c in unresolveds):
-            raise AlgorithmFailure("H")
-
-
-    def XXXheuristic_order(self):
-        xxx = """
-        unresolveds = list(self.unresolved_cells())
-        counts = self.count_possibles(candidates=self.unresolved_cells())
-        elemsort = (
-            k for k, v in sorted(self.count_possibles().items(), key=lambda t: -t[1])
-            if self.knowns[k] < self.geo.size)
-        """
-
-        unresolveds = list(self.unresolved_cells())
-        elemsort = (
-            k for k, v in sorted(self.knowns.items(), key=lambda t: t[1]))
-        for elem in elemsort:
-            haselem = list(
-                itertools.filterfalse(
-                    lambda c: elem not in c.elems,
-                    unresolveds))
-            for cell in haselem:
-                if not cell.value:
-                    yield (cell, elem)
-                unresolveds.remove(cell)
-        # sanity check
-        if any(c.value is None for c in unresolveds):
-            raise AlgorithmFailure("H")
+                    unresolveds.remove(cell)
+        # sanity check - all truly unresolveds have been yielded
+        assert not any(c.value is None for c in unresolveds), "H LOOP OOPS"
 
     # support function for heuristic order. How many UNRESOLVED cells
     # does each element appear in as a possibility.
@@ -424,8 +408,7 @@ class Sudoku:
 
         self.__cached = None           # see legalmoves/copy_and_move
         self._valid = None             # force revalidation next time
-        if cell.resolve(m.elem):       # this is THE element here now
-            self.knowns[m.elem] += 1
+        cell.resolve(m.elem)           # this is THE element here now
 
         if autosolve:
             self._autosolve(m)
@@ -456,16 +439,20 @@ class Sudoku:
     # kill is recursively carried out accordingly. In many cases the entire
     # puzzle will end up resolving from cascading kills.
     def _kill(self, row, col, elem):
-        # the OTHER cells of every group this (row, col) cell is in
-        this = self.grid[(row, col)]         # excluded from killcells
+
+        # sanity check - never should be killing an unresolved call
+        assert self.grid[(row, col)].value is not None, "BAD KILL"
+
+        # subtlety note: excluding resolved cells (.value is not None)
+        #          also excludes this (row, col) as it should / needs to.
         killcells = itertools.filterfalse(
-            lambda c: c is this,
+            lambda c: c.value is not None,
             (self.grid[rc] for rc in self.geo.combinedgroups(row, col)))
 
         for cell in killcells:
-            if cell.remove_element(elem):
-                # this is now resolved, so recursively kill!
-                self.knowns[cell.value] += 1
+            cell.remove_element(elem)
+            # if it just became resolved then recurively kill...
+            if cell.value is not None:
                 self._kill(cell.row, cell.col, cell.value)
 
     def find_singletons(self):
@@ -523,8 +510,12 @@ class Sudoku:
                         for elem in unsolved_elems:
                             if elem not in (a, b) and elem in cell.elems:
                                 cell.remove_element(elem)
+                                # don't have to recurse becaues there is
+                                # no possibility that the cell resolved
+                                # (by definition it still has (a, b) in it)
+
                         # sanity check but remove this later
-                        assert len(cell.elems) == 2, "XXX 1"
+                        assert len(cell.elems) == 2, f"XXX 1 {a=} {b=}, {abcells=}, {cell=}, {unsolved_elems=}, {self.cell_lookasides=}"
                         assert a in cell.elems, "XXX a"
                         assert b in cell.elems, "XXX b"
 
@@ -574,11 +565,13 @@ class Sudoku:
         for elem in self.unsolved_elems():
             for rc in self.find_a_pointing_pair(elem):
                 cell = self.grid[rc]
-                if cell.remove_element(elem):
-                    # striking this one resolved the cell, so
-                    # recursively invoke all the move() magic again
-                    self.move(CellMove(*rc, cell.value), autosolve=True)
-                    found_any = True
+                if cell.value is None:
+                    cell.remove_element(elem)
+                    if cell.value is not None:
+                        # striking this one resolved the cell, so
+                        # recursively invoke all the move() magic again
+                        self.move(CellMove(*rc, cell.value), autosolve=True)
+                        found_any = True
         return found_any
 
     # A sequence of coordinates is a pointing pair if:
